@@ -873,10 +873,11 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         // the post of the agent that left it for you (ab_todo). One moved from before to-dos were tasks keeps
         // when it was `added` and done. `pages`: the pages it's on, as your page names them, any number, each
         // { page, at, by } (a page's checklist is its tasks; `page`, one, from before); `group`: the group it's in.
-        // `text` is its title, one short line, and `note` its body, on why or how (titled() in text.mjs). `scope: "thread"`: a to-do its thread keeps for you, on that
+        // `text` is its title, one short line, and `note` its body, on why or how (titled() in text.mjs). `answers`: the
+        // buttons an agent's to-do offers (ab_todo), each a label and what pressing it sends as your message. `scope: "thread"`: a to-do its thread keeps for you, on that
         // thread and not on your Tasks, until task.scope moves it there; `later`: an agent's
         // to-do put on your Tasks on purpose (ab_todo's later, or moved there from its thread), which stays there.
-        state.tasks[op.tid] = { id: op.tid, owner: op.owner, text: op.text, workspace: op.workspace || null, agent: op.agent || null, rank: op.rank ?? 0, at: op.added || now, done: !!op.done, done_at: op.done ? op.done_at || now : null, sent: op.sent || [], posts: [...(op.posts || [])], ...(op.from ? { from: op.from } : {}), ...(op.source ? { source: op.source } : {}), pages: [], ...(op.group ? { group: op.group } : {}), ...(op.note ? { note: op.note } : {}), ...(op.scope === "thread" ? { scope: "thread" } : op.later ? { later: true } : {}) };
+        state.tasks[op.tid] = { id: op.tid, owner: op.owner, text: op.text, workspace: op.workspace || null, agent: op.agent || null, rank: op.rank ?? 0, at: op.added || now, done: !!op.done, done_at: op.done ? op.done_at || now : null, sent: op.sent || [], posts: [...(op.posts || [])], ...(op.from ? { from: op.from } : {}), ...(op.source ? { source: op.source } : {}), ...(Array.isArray(op.answers) && op.answers.length ? { answers: op.answers } : {}), pages: [], ...(op.group ? { group: op.group } : {}), ...(op.note ? { note: op.note } : {}), ...(op.scope === "thread" ? { scope: "thread" } : op.later ? { later: true } : {}) };
         for (const e of state.tasks[op.tid].sent) linkPost(state.tasks[op.tid], e.post, e.at, "sent");
         for (const e of [...(op.pages || []), ...(op.page ? [op.page] : [])]) linkPage(state.tasks[op.tid], typeof e === "string" ? e : e?.page, e?.at || now, e?.by || (op.from ? "agent" : "you"));
         // In a group, its posts hear of it (not when Undo puts one back, nor a thread's own to-do).

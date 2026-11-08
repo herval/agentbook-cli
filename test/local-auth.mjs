@@ -64,15 +64,27 @@ check(proofOk(KEY, s1.nonce, proofOf(KEY, s1.nonce)) && !proofOk(KEY, s1.nonce, 
 
 check(JSON.stringify(lsofListeners("p501\nu501\nf12\n")) === '[{"pid":501,"uid":501}]' && lsofListeners("").length === 0, "lsof's answer reads as who listens");
 const me = process.getuid();
-check(ownListener(4320, { lsof: () => `p77\nu${me}\nf9\n` }).own === true && ownListener(4320, { lsof: () => `p77\nu${me}\nf9\n` }).pid === 77, "a listener that's this person's is theirs, with its pid");
-check(ownListener(4320, { lsof: () => `p77\nu${me + 1}\nf9\n` }).own === false, "one that's someone else's isn't");
-check(ownListener(4320, { lsof: () => "" }).own === false, "nor one lsof doesn't show, as it shows others' only to root");
-check(ownListener(4320, { lsof: () => null }).own === null, "and with no lsof there's no telling");
+const mac = { platform: "darwin" };
+check(ownListener(4320, { ...mac, lsof: () => `p77\nu${me}\nf9\n` }).own === true && ownListener(4320, { ...mac, lsof: () => `p77\nu${me}\nf9\n` }).pid === 77, "a listener that's this person's is theirs, with its pid");
+check(ownListener(4320, { ...mac, lsof: () => `p77\nu${me + 1}\nf9\n` }).own === false, "one that's someone else's isn't");
+check(ownListener(4320, { ...mac, lsof: () => "" }).own === false, "nor one lsof doesn't show, as it shows others' only to root");
+check(ownListener(4320, { ...mac, lsof: () => null }).own === null, "and with no lsof there's no telling");
 const procNet = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 0100007F:10E0 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 1234 1 0000000000000000 100 0 0 10 0
    1: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1002        0 1235 1 0000000000000000 100 0 0 10 0
    2: 0100007F:10E0 0100007F:C350 01 00000000:00000000 00:00000000 00000000  1003        0 1236 1 0000000000000000 100 0 0 10 0`;
 check(JSON.stringify(procListeners(procNet, 4320)) === "[1001]" && procListeners(procNet, 4310).length === 0, "and on Linux, /proc/net/tcp says whose socket listens on a port (not a connection to it)");
+const linux = (uid) => ({ platform: "linux", proc: () => procNet.replace(" 1001 ", ` ${uid} `), pidOf: (inodes) => (inodes.includes(1234) ? 77 : null) });
+check(JSON.stringify(ownListener(4320, linux(me))) === '{"own":true,"pid":77}', "there, one that's this person's is theirs, with the pid whose fds hold its socket");
+check(ownListener(4320, linux(me + 1)).own === false && ownListener(4310, linux(me)).own === null && ownListener(4320, { platform: "linux", proc: () => null }).own === null, "one that's someone else's isn't, and with nothing listening or no /proc there's no telling");
+{
+  // For real, on whatever this runs on: what listens here is this process.
+  const srv = net.createServer().listen(0, "127.0.0.1");
+  await new Promise((r) => srv.once("listening", r));
+  const real = ownListener(srv.address().port);
+  check(real.own === true && real.pid === process.pid, `a real listener of this process's is its own, with its pid (${JSON.stringify(real)})`);
+  srv.close();
+}
 const answer = (headers = {}) => ({ headers: new Headers(headers) });
 const ours = () => ({ own: true, pid: 77 });
 const theirs = () => ({ own: false });

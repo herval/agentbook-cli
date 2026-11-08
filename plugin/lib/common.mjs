@@ -35,15 +35,17 @@ export function localKey() {
 // Whether what listens on a port here is this person's: { own: true, pid } (pid null where it can't be told),
 // { own: false } (someone else's), or { own: null } (this machine can't say). macOS and the BSDs: lsof, which shows
 // another user's sockets only to root, so one it doesn't show is someone else's. Linux: /proc/net/tcp, which says
-// whose each socket is.
-export function ownListener(port, { lsof = runLsof, proc = readProcNet } = {}) {
-  if (process.platform === "linux") {
+// whose each socket is, and the process of this person's whose /proc/<pid>/fd holds it.
+export function ownListener(port, { lsof = runLsof, proc = readProcNet, pidOf = socketPid, platform = process.platform } = {}) {
+  if (platform === "linux") {
     const text = proc();
     if (text == null) return { own: null };
-    const uids = procListeners(text, port);
-    return uids.length ? { own: uids.every((u) => u === process.getuid()), pid: null } : { own: null };
+    const socks = procSockets(text, port);
+    if (!socks.length) return { own: null };
+    if (!socks.every((s) => s.uid === process.getuid())) return { own: false };
+    return { own: true, pid: pidOf(socks.map((s) => s.inode)) };
   }
-  if (process.platform === "win32") return { own: null };
+  if (platform === "win32") return { own: null };
   const out = lsof(port);
   if (out == null) return { own: null };
   const found = lsofListeners(out);
@@ -77,15 +79,36 @@ function readProcNet() {
   });
   return parts.every((p) => p == null) ? null : parts.filter(Boolean).join("\n");
 }
-// /proc/net/tcp(6): the uids of the sockets listening (state 0A) on a port. -> [uid]
-export function procListeners(text, port) {
+// /proc/net/tcp(6): the sockets listening (state 0A) on a port, whose (uid) and which (inode). -> [{ uid, inode }]
+export function procSockets(text, port) {
   const hex = Number(port).toString(16).toUpperCase().padStart(4, "0");
-  const uids = [];
+  const out = [];
   for (const line of String(text).split("\n")) {
     const f = line.trim().split(/\s+/);
-    if (f.length > 7 && f[1]?.endsWith(`:${hex}`) && f[3] === "0A") uids.push(Number(f[7]));
+    if (f.length > 9 && f[1]?.endsWith(`:${hex}`) && f[3] === "0A") out.push({ uid: Number(f[7]), inode: Number(f[9]) });
   }
-  return uids;
+  return out;
+}
+export const procListeners = (text, port) => procSockets(text, port).map((s) => s.uid);
+// Which of this person's processes holds one of these sockets: one of its /proc/<pid>/fd links reads "socket:[inode]".
+// Only this person's are looked at, as others' fds can't be read, and aren't wanted. -> pid, or null
+export function socketPid(inodes, root = "/proc") {
+  const want = new Set(inodes.filter((i) => i > 0).map((i) => `socket:[${i}]`));
+  if (!want.size) return null;
+  let pids = [];
+  try {
+    pids = fs.readdirSync(root).filter((d) => /^\d+$/.test(d));
+  } catch {
+    return null;
+  }
+  for (const pid of pids) {
+    try {
+      if (fs.statSync(path.join(root, pid)).uid !== process.getuid()) continue;
+      const fds = path.join(root, pid, "fd");
+      for (const fd of fs.readdirSync(fds)) if (want.has(fs.readlinkSync(path.join(fds, fd)))) return Number(pid);
+    } catch {}
+  }
+  return null;
 }
 
 // Once a call here has had its agentbook-cli's proof, its folder says so (cli/proved, this person's alone, as the

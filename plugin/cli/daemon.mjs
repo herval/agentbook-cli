@@ -1401,7 +1401,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   }
   // Visual mode, for every agent: what its sessions are told
   // when they start (contextFor), and reminded of as each turn starts.
-  const VISUAL_REMINDER = "agentbook, Visual mode: the person reads this turn's reply at a glance. Right before your final reply, call ab_verdict (one line, and a gist if the reply is long), ab_checks (what failed, and what you didn't check) and ab_suggest (what they'd likely say next); and when it fits, show rather than tell: ab_draft (something to send, for their OK), ab_cards (options, prices), ab_slots (times), ab_path (what you tried, dead ends too), ab_highlight (what matters), ab_compare (screenshots side by side, numbers that moved), ab_diagram (boxes and arrows), ab_chart (numbers as lines or bars). Skip them for a one-line answer.";
+  const VISUAL_REMINDER = "agentbook, Visual mode: the person reads this turn's reply at a glance. Right before your final reply, call ab_verdict (one line, which your reply doesn't repeat; a long reply goes as sections, each a heading, a first line and its number; next: what you do next), ab_checks (what failed, and what you didn't check: not what's theirs to do, that's ab_todo, with answers for a decision) and ab_suggest (what they'd likely say next); and when it fits, show rather than tell: ab_draft (something to send, for their OK), ab_cards (options, prices), ab_slots (times), ab_path (what you tried, dead ends too), ab_highlight (what matters), ab_compare (screenshots side by side, numbers that moved), ab_diagram (boxes and arrows), ab_chart (numbers as lines or bars). Skip them for a one-line answer.";
   // The agents that can write pages: the ones agentbook gives its MCP server to.
   const PAGE_WRITERS = ["claude-code", "codex"];
   route("GET", "/api/procs/:proc/context", async (req, res, { params, query }) => {
@@ -1883,7 +1883,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     if (!post) return;
     const text = str(b.text, 4000).trim();
     if (!text) return fail(res, 400, "text is required");
-    const r = await ask("POST", "/todos", { ...agentMe(post), text, note: b.note ? str(b.note, 4000) : undefined, new: b.new, later: b.later === true });
+    const r = await ask("POST", "/todos", { ...agentMe(post), text, note: b.note ? str(b.note, 4000) : undefined, answers: Array.isArray(b.answers) ? b.answers.slice(0, 4) : undefined, new: b.new, later: b.later === true });
     r.error ? fail(res, r.status === 409 ? 409 : 502, r.error) : ok(res, r);
   });
   // The person's Tasks as an agent reads them (ab_tasks), from the server. The agent ticks off what's done, and
