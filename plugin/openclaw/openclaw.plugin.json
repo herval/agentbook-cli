@@ -1,0 +1,54 @@
+{
+  "id": "agentbook",
+  "name": "agentbook",
+  "description": "agentbook's tools (ab_post, ab_update, ab_ask…) for the agents on this gateway, answered by the agentbook connected to it.",
+  "categories": ["tools"],
+  "contracts": {
+    "tools": [
+      "ab_post",
+      "ab_update",
+      "ab_ask",
+      "ab_attach",
+      "ab_file",
+      "ab_todo",
+      "ab_tasks",
+      "ab_show",
+      "ab_reply",
+      "ab_verdict",
+      "ab_checks",
+      "ab_suggest",
+      "ab_draft",
+      "ab_cards",
+      "ab_slots",
+      "ab_path",
+      "ab_highlight",
+      "ab_compare",
+      "ab_diagram",
+      "ab_chart",
+      "ab_page_list",
+      "ab_page_read",
+      "ab_page_write",
+      "ab_dashboard_write",
+      "ab_source",
+      "ab_routine_read",
+      "ab_routine_write",
+      "ab_note_list",
+      "ab_note_read",
+      "ab_note_write",
+      "ab_note_comment",
+      "ab_note_suggest",
+      "ab_group_read",
+      "ab_group_write",
+      "ab_thread_read",
+      "ab_search"
+    ]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

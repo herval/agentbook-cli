@@ -1,0 +1,12 @@
+{
+  "name": "agentbook-cli",
+  "private": true,
+  "description": "Follow and steer your coding agents from one page: the part of agentbook that runs on your machine.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "repository": { "type": "git", "url": "https://github.com/herval/agentbook-cli.git" },
+  "type": "module",
+  "scripts": {
+    "test": "node test/all.mjs"
+  },
+  "engines": { "node": ">=22.13" }
+}

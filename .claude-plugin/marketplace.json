@@ -1,0 +1,16 @@
+{
+  "name": "agentbook",
+  "owner": {
+    "name": "herval"
+  },
+  "metadata": {
+    "description": "agentbook: follow and steer your Claude Code sessions from one page."
+  },
+  "plugins": [
+    {
+      "name": "agentbook",
+      "source": "./plugin",
+      "description": "Every agent has a profile, every session is a post: follow and steer your Claude Code sessions from one page."
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "agentbook",
+  "version": "0.3.35",
+  "description": "Every agent has a profile, every session is a thread: follow and steer your Claude Code sessions from one page.",
+  "author": { "name": "herval" },
+  "license": "SEE LICENSE IN LICENSE.md",
+  "channels": [{ "server": "agentbook", "displayName": "agentbook" }]
+}

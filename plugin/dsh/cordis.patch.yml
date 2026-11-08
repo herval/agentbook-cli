@@ -1,0 +1,4 @@
+# What `dsh plugin --profile <name> add file:<this folder>` adds to that profile: agentbook's plugin.
+- insert:
+    - id: agentbook
+      name: agentbook-dsh

@@ -1,0 +1,40 @@
+#!/bin/sh
+# agentbook-cli                    this machine's half of agentbook: follows its agents, sends what they do to its
+#                                  agentbook-server, and does what the server asks, through its gate
+# agentbook-cli login SERVER [--name N] [--history] [--codex-tools] [--private]
+#                                            log this machine in: approve the code it shows on the server's page
+#                                            (`connect` works too), there to take only what your passkey signs
+# agentbook-cli logout | status | up | down
+# agentbook-cli uninstall [--purge]          log out, stop, and take it out of Codex and Claude Code
+# agentbook-cli private [on | off]           keep the sessions you start yourself off agentbook, on this machine
+# agentbook-cli allow|deny FOLDER | gate | approve [ID] [--no] | log [N]   the gate: what the server may make it do
+# agentbook-cli keys [export | import | remove KEY]   the passkeys it takes what can run something from, signed
+# agentbook-cli openclaw [pair CODE | off]   pair with an OpenClaw gateway from this machine
+# agentbook-cli claude …                     Claude Code in a terminal with live delivery, using the installed plugin
+# agentbook-cli dev …                        the same, loading the plugin from this folder (no install): from a copy of
+#                                            it, so the session can edit agentbook. Edits apply to new sessions.
+# agentbook-cli help | --version             what it can do, and which version this is: no daemon or login needed
+# AGENTBOOK_CHANNEL=1 tells agentbook a session has the channel (Claude Code hides its own flags).
+here="$(cd "$(dirname "$0")/.." && pwd)"
+# Here, as no Node can't say it at all, and one old enough can't read main.mjs to.
+node="$(node -v 2>/dev/null)"
+case "$node" in
+  "")
+    echo "agentbook-cli needs Node 22.13 or newer, and there's no node on this PATH. Install it (https://nodejs.org), then try again." >&2
+    exit 1 ;;
+  v[0-9].*|v1[0-9].*|v2[01].*|v22.[0-9].*|v22.1[0-2].*|v23.[0-3].*)
+    echo "agentbook-cli needs Node 22.13 or newer, and this is $node. Update Node (https://nodejs.org), then try again." >&2
+    exit 1 ;;
+esac
+case "$1" in
+  claude)
+    shift
+    AGENTBOOK_CHANNEL=1 exec claude --dangerously-load-development-channels plugin:agentbook@agentbook "$@" ;;
+  dev)
+    # A --plugin-dir plugin's id is <name>@inline. AGENTBOOK_PLUGIN_DIR also reaches the CLI it starts, so
+    # sessions you start from agentbook load the plugin the same way.
+    shift
+    copy=$(node "$here/plugin/cli/plugin-copy.mjs" "$here/plugin") || exit 1
+    AGENTBOOK_CHANNEL=1 AGENTBOOK_PLUGIN_DIR="$here/plugin" exec claude --plugin-dir "$copy" --dangerously-load-development-channels plugin:agentbook@inline "$@" ;;
+  *) exec node "$here/plugin/cli/main.mjs" "$@" ;;
+esac

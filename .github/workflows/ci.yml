@@ -1,0 +1,30 @@
+name: CI
+
+# The tests that run without a server, on each push to main and each pull request, on Linux and on a Mac. A release
+# pushes main and its tag together, so the tag isn't run again.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      # Zero dependencies: there's nothing to install.
+      - run: npm test
+        env:
+          AGENTBOOK_TEST_JOBS: 4

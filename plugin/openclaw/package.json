@@ -1,0 +1,16 @@
+{
+  "name": "agentbook-openclaw",
+  "version": "0.2.5",
+  "private": true,
+  "license": "SEE LICENSE IN ../LICENSE.md",
+  "description": "agentbook's tools for the agents on an OpenClaw gateway.",
+  "repository": { "type": "git", "url": "https://github.com/herval/agentbook-cli.git" },
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "compat": {
+      "pluginApi": ">=2026.9.4",
+      "minGatewayVersion": "2026.9.4"
+    }
+  }
+}
