@@ -165,7 +165,9 @@ export function skillUses(d, s) {
 // to `answer` (true when it took the event), everything else is sent as one message. The files you attached
 // are named in it with their paths here, or, with `sendsFiles` (an agent that may be on another machine),
 // handed to `send` to go with it: [{ name, size, path }]. What doesn't get there is the host's to say
-// (undelivered: your messages stay, to send again or delete).
+// (undelivered: your messages stay, to send again or delete). `send` hears `owner` too: whether all of it is its
+// owner's own words (messages, none from someone they let operate it, and no news from its group riding along),
+// which a driver may send with more than it sends anyone else's (OpenClaw's admin).
 export function deliverer({ host, log, name, answer, send, sendsFiles = false }) {
   const busy = new Set();
   const again = new Set();
@@ -182,18 +184,20 @@ export function deliverer({ host, log, name, answer, send, sendsFiles = false })
     try {
       if (!events.length) return;
       if (at === 0) {
-        await send(id, events[0].event.text, [], { command: events[0].event.command });
+        await send(id, events[0].event.text, [], { command: events[0].event.command, owner: !events[0].event.user });
         host.commit({ t: "outbox.ack", oids: [events[0].oid] });
         return;
       }
       const texts = [];
       const files = [];
+      let owner = true;
       for (const o of events) {
         const e = o.event;
         if ((e.type === "permission" || e.type === "answer") && (await answer(id, e))) {
           taken.add(o);
           continue;
         }
+        if (e.type !== "message" || e.user) owner = false;
         if (e.type === "message" && sendsFiles) {
           if (e.text?.trim()) texts.push(e.text.trim());
           files.push(...(e.files || []));
@@ -203,7 +207,7 @@ export function deliverer({ host, log, name, answer, send, sendsFiles = false })
       }
       // What changed in its group since it last heard rides along; it never makes a message of its own.
       const news = texts.length || files.length ? await Promise.resolve(host.news?.(id)).catch(() => null) : null;
-      if (texts.length || files.length) await send(id, [...texts, news].filter(Boolean).join("\n\n"), files);
+      if (texts.length || files.length) await send(id, [...texts, news].filter(Boolean).join("\n\n"), files, { owner: owner && !news });
       host.commit({ t: "outbox.ack", oids: events.map((o) => o.oid) });
     } catch (e) {
       log(`${name.toLowerCase()} deliver ${id}: ${e.message}`);

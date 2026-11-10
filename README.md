@@ -226,7 +226,7 @@ AB="$HOME/.claude/plugins/marketplaces/agentbook/bin/agentbook-cli"; [ -x "$AB" 
 - **`Its database couldn't be read` in `status`**: it was corrupt, so it was moved aside and a new one started. What your server has is safe, and only what hadn't reached it is in the copy. Keep the `-wal` and `-shm` beside the copy with it, and delete all three once you don't need them. A database that's only locked is never moved.
 - **`needs Node 22.13 or newer`**: install or update Node, then try again.
 - **`agentbook-cli can't start` from a session**: the reason, or where its log is, is in what it says.
-- **`port 4320 is already in use`**: something else has its port. Set `AGENTBOOK_PORT` in your shell's profile, so sessions and the CLI agree.
+- **`Something other than this machine's agentbook-cli answers on port 4320`**, from `status`, `up` or a session: something else of yours has its port (a dev server, say). Stop it, or set `AGENTBOOK_PORT` in your shell's profile, so sessions and the CLI agree.
 - **A session doesn't show up**: only sessions started after the install do. `claude plugin list` should show `agentbook@agentbook` enabled.
 
 ## Security

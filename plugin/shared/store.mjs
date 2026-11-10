@@ -262,6 +262,8 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
           session_id: op.session_id || prev?.session_id || null,
           transcript: op.transcript || prev?.transcript || null,
           channel: !!op.channel,
+          // Claude Desktop or VS Code (appOf): the same process keeps it, a resume elsewhere (a terminal, the background) doesn't.
+          app: op.app || (prev?.proc === op.proc ? prev?.app : null) || null,
           launch: launch?.id || prev?.launch || null,
           cloud: op.cloud || prev?.cloud || null, // "claude" or "codex": runs in their cloud, not on a machine
           url: op.url || prev?.url || null,
@@ -286,6 +288,7 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         if (op.turn === "start" && !op.text) post.doing = null;
         if (op.text) post.doing = op.text;
         if (op.transcript) post.transcript = op.transcript;
+        if (op.app) post.app = op.app;
         // Hooks mark where Claude's turns start and end, so events can wait for the gap between turns.
         if (op.turn === "start") Object.assign(post, { busy: true, turn_started: now });
         // What the last turn said of itself and no reply took (session.shape) isn't this turn's.
@@ -481,6 +484,14 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         post.rev = (post.rev || 0) + 1;
         break;
       }
+      case "session.from": {
+        // The thread it was started from (a Claude Desktop session another one started, cli/desktop.mjs). Not news
+        // of its own: it keeps its place in the lists.
+        if (!post || !op.started_from || op.started_from === post.id) break;
+        post.started_from = op.started_from;
+        post.rev = (post.rev || 0) + 1;
+        break;
+      }
       case "session.model": {
         // The model you picked for the session's next turn; null once it's switched (or the pick is undone).
         if (!post) break;
@@ -522,11 +533,16 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
           // Put away only if both were: one of them going on is the thread going on.
           for (const f of ["archived", "hidden"]) if (into[f] && !from[f]) Object.assign(into, { [f]: false, [`${f}_at`]: null });
           if (op.follow) {
-            for (const k of ["session_id", "transcript", "proc", "pid", "host", "channel", "cloud", "url", "state", "busy", "doing", "turn_started", "turn_ended", "failed", "ended", "end_reason", "asleep", "slept", "sleep_reason", "ai_title", "model", "plan", "stats", "context", "skill_uses", "loops", "shape"]) {
+            for (const k of ["session_id", "transcript", "proc", "pid", "host", "channel", "app", "cloud", "url", "state", "busy", "doing", "turn_started", "turn_ended", "failed", "ended", "end_reason", "asleep", "slept", "sleep_reason", "ai_title", "model", "plan", "stats", "context", "skill_uses", "loops", "shape"]) {
               if (from[k] !== undefined) into[k] = from[k];
             }
           }
           delete state.sessions[key];
+        } else if (op.follow && op.session_id) {
+          // A copy that never said hello (Claude Code stopped it before its turn: no login) has no post to move here,
+          // but what you sent is in it: with its `session_id`, the thread goes on in it, and a resume resumes it.
+          into.session_id = op.session_id;
+          if (into.transcript) into.transcript = into.transcript.replace(/[^/\\]+\.jsonl$/, `${op.session_id}.jsonl`);
         }
         touch(into, now);
         break;
@@ -756,7 +772,8 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         // A slash command goes as it was typed, with nothing after it: its agent reads it as a command, not a message.
         if (op.from === "human" && (text || files.length) && (op.via || "dash") === "dash" && !op.ext && !op.resume) {
           const note = op.routine || op.command ? "" : (op.note ?? mentionNote(text, state.pages, Date.parse(now)));
-          deliver({ type: "message", text: [intro, text, note].filter(Boolean).join("\n\n"), files: files.map((f) => ({ name: f.name, size: f.size, path: path.join(filesDir, f.stored) })), ...(op.command ? { command: op.command } : {}) }, mid, queue);
+          // `user`: someone its owner lets operate it, so a driver sends it as theirs, not the owner's (OpenClaw's admin).
+          deliver({ type: "message", text: [intro, text, note].filter(Boolean).join("\n\n"), files: files.map((f) => ({ name: f.name, size: f.size, path: path.join(filesDir, f.stored) })), ...(op.command ? { command: op.command } : {}), ...(user ? { user } : {}) }, mid, queue);
         }
         touch(post, op.when || now);
         break;
@@ -823,7 +840,7 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         else if (m.from === "human") {
           // Its outbox no longer has it: sent again as it reads.
           const files = (m.files || []).map((x) => state.files.find((f) => f.id === x.id)).filter(Boolean);
-          deliver({ type: "message", text: [m.intro, m.text].filter(Boolean).join("\n\n"), files: files.map((f) => ({ name: f.name, size: f.size, path: path.join(filesDir, f.stored) })) }, m.id);
+          deliver({ type: "message", text: [m.intro, m.text].filter(Boolean).join("\n\n"), files: files.map((f) => ({ name: f.name, size: f.size, path: path.join(filesDir, f.stored) })), ...(m.user ? { user: m.user } : {}) }, m.id);
         }
         if (post) touch(post, now);
         break;
@@ -1171,6 +1188,16 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         delete mine[op.key];
         mine[op.key] = op.failed || "";
         for (const k of Object.keys(mine).slice(0, -200)) delete mine[k];
+        break;
+      }
+      case "routine.thread": {
+        // A thread started on a routine from its page (server only, routine-threads.mjs): `key` says which routine,
+        // `lid` the launch it went out as. Its newest 20.
+        if (!op.key || !op.lid) break;
+        const list = ((state.routine_threads ||= {})[op.key] ||= []);
+        if (list.some((x) => x.lid === op.lid)) break;
+        list.push({ lid: op.lid, agent: op.agent || null, at: now, ...(op.user ? { user: op.user } : {}) });
+        list.splice(0, Math.max(0, list.length - 20));
         break;
       }
       case "prefs.set": {

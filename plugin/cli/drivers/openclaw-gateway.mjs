@@ -18,6 +18,14 @@ import { WebSocketClient } from "./ws.mjs";
 
 const SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex"); // an Ed25519 public key's DER, before its 32 bytes
 export const SCOPES = ["operator.read", "operator.write", "operator.approvals", "operator.questions"];
+// With admin too: once the gateway approved it (an upgrade, see the driver's askAdmin), agentbook keeps a second
+// connection with these, for what its owner does, and nothing else. OpenClaw takes whatever a connection with admin
+// sends as from its own owner (chat.send's senderIsOwner), with the owner-only tools that come with that (its config,
+// cron jobs, a terminal), so the everyday connection, which everyone else's messages go over, stays without it. One
+// device token does for both: asking for less than a token has gets the same token back (ensureDeviceToken).
+export const ADMIN = "operator.admin";
+export const ADMIN_SCOPES = [...SCOPES, ADMIN];
+export const hasAdmin = (identity) => !!identity?.deviceToken && Array.isArray(identity.scopes) && identity.scopes.includes(ADMIN);
 const CLIENT = { id: "gateway-client", mode: "backend", displayName: "agentbook", version: "2.0" };
 const PLATFORM = { darwin: "macos", linux: "linux", win32: "windows" }[process.platform] || process.platform;
 
@@ -50,8 +58,12 @@ export const authPayload = ({ deviceId, scopes, signedAt, token, nonce }) => ["v
 
 // Connect, and stay connected: `rpc(method, params)` waits for the connection. `identity` is saved through
 // `save` when the gateway hands it a device token. `onState` hears { state: "connecting" | "pairing" |
-// "connected" | "failed", error, requestId }; `onEvent` the gateway's events.
-export function connectGateway({ url, token, password, bootstrapToken, identity, save = () => {}, onState = () => {}, onEvent = () => {}, log = () => {} }) {
+// "connected" | "failed", error, requestId }; `onEvent` the gateway's events. `scopes`: what it asks for (SCOPES,
+// or ADMIN_SCOPES for the owner's connection); `subscribe`: whether it hears sessions change (the everyday one
+// does). `owners`: the owner's connection, which never forgets the device token (the everyday one uses it too) and
+// gives up, rather than trying again, when the gateway won't take it with admin: it says so (`failed`, with the
+// gateway's code), and the driver goes on without admin.
+export function connectGateway({ url, token, password, bootstrapToken, identity, scopes = SCOPES, subscribe = true, owners = false, save = () => {}, onState = () => {}, onEvent = () => {}, log = () => {} }) {
   let ws = null;
   let closed = false;
   let connected = false;
@@ -172,18 +184,24 @@ export function connectGateway({ url, token, password, bootstrapToken, identity,
     // A setup code's bootstrap token, until the gateway hands agentbook a device token of its own.
     const bootstrap = authToken || password ? undefined : bootstrapToken;
     if (!authToken && !password && !bootstrap) {
+      if (owners) {
+        closed = true;
+        clearInterval(watch);
+        setState({ state: "failed", error: "No device token to sign in with", code: "NO_TOKEN" });
+        return ws?.close();
+      }
       fail("The gateway no longer knows agentbook. Connect again, with a new setup code or its token.", 60000);
       return ws?.close();
     }
     const signedAt = Number.isInteger(ts) ? ts : Date.now();
-    const signature = crypto.sign(null, Buffer.from(authPayload({ deviceId: identity.deviceId, scopes: SCOPES, signedAt, token: authToken || bootstrap, nonce }), "utf8"), crypto.createPrivateKey(identity.privateKey)).toString("base64url");
+    const signature = crypto.sign(null, Buffer.from(authPayload({ deviceId: identity.deviceId, scopes, signedAt, token: authToken || bootstrap, nonce }), "utf8"), crypto.createPrivateKey(identity.privateKey)).toString("base64url");
     try {
       const ok = await request("connect", {
         minProtocol: 4,
         maxProtocol: 4,
         client: { ...CLIENT, platform: PLATFORM },
         role: "operator",
-        scopes: SCOPES,
+        scopes,
         caps: [],
         auth: { ...(authToken ? { token: authToken } : {}), ...(bootstrap ? { bootstrapToken: bootstrap } : {}), ...(password ? { password } : {}) },
         userAgent: "agentbook/2.0",
@@ -195,15 +213,24 @@ export function connectGateway({ url, token, password, bootstrapToken, identity,
       tick = Number(ok?.policy?.tickIntervalMs) || 30000;
       if (ok?.auth?.deviceToken && ok.auth.deviceToken !== identity.deviceToken) {
         identity.deviceToken = ok.auth.deviceToken;
-        identity.scopes = ok.auth.scopes || SCOPES;
+        identity.scopes = ok.auth.scopes || scopes;
         save(identity);
       }
       setState({ state: "connected", server: ok?.server?.version || null, scopes: ok?.auth?.scopes || [] });
       for (const w of waiters) w.resolve();
       waiters = [];
-      request("sessions.subscribe", {}).catch(() => {}); // sessions.changed events, so posts update at once
+      if (subscribe) request("sessions.subscribe", {}).catch(() => {}); // sessions.changed events, so posts update at once
     } catch (e) {
       const code = e.details?.code || e.code || "";
+      // The owner's connection, turned down (its token doesn't have admin after all, or the gateway wants admin
+      // approved again): never a retry, which would ask brick again and again and count as failed sign-ins.
+      if (owners && !/RATE_LIMIT/i.test(code) && !/too many|retry later/i.test(e.message)) {
+        log(`openclaw gateway (admin): ${e.message}`);
+        closed = true;
+        clearInterval(watch);
+        setState({ state: "failed", error: e.message, code: /PAIRING_REQUIRED/i.test(code) || /pairing required|not paired/i.test(e.message) ? "PAIRING_REQUIRED" : code });
+        return ws?.close();
+      }
       if (/PAIRING_REQUIRED/i.test(code) || /pairing required|not paired/i.test(e.message)) {
         // Waiting for someone to approve this device on the gateway. The request lasts 5 minutes; asking again
         // keeps it fresh.

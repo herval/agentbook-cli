@@ -18,6 +18,7 @@ import { secretFileRefusal } from "./redact.mjs";
 import { ATTACHABLE, CHART_KINDS, NODE_STATES, WIDTHS, widgetDocs } from "../shared/widgets.mjs";
 import { CHECKS, COMPARES, DRAFTS, FRAMES, LIMITS, PICKS, VERDICTS } from "../shared/shapes.mjs";
 import { RANGES, SHAPES } from "../shared/dashboards.mjs";
+import { AGENT_MAX } from "../shared/page-shape.mjs";
 import { fromServer, visualMode } from "./context.mjs";
 
 // Agents agentbook runs through a driver: it registers their posts and hands them what the person sends.
@@ -48,12 +49,12 @@ const DRIVEN_INSTRUCTIONS = `This conversation is a thread on agentbook, a page 
 - ab_update: a result worth seeing, past tense: shipped, merged, found, decided, blocked. A few, not every step.
 - ab_ask: when you need a decision, approval, answer or file. Prefer it over stopping to ask. Until it's answered, don't build what it decides, not even on your default: do only what doesn't depend on it, then end your turn. The answer arrives as your next message.
 - ab_attach: something to keep in view on the thread: a table, a metric, a chart, a diagram, a note, a link.
-- ab_verdict, ab_checks, ab_suggest, ab_draft, ab_cards, ab_slots, ab_path, ab_highlight, ab_compare, ab_diagram, ab_chart: what the reply that ends your turn shows besides its text: how it went, what failed or you didn't check, replies to click, drafts to send, options, times, your path, what matters, pictures side by side or numbers that moved, a diagram, a chart. Your context says when to use them (Visual mode).
+- ab_verdict (the one line of the reply that ends your turn) and ab_suggest (what they'd say next), right before that reply. ab_checks, ab_draft, ab_cards, ab_slots, ab_path, ab_highlight, ab_compare, ab_diagram, ab_chart only when text can't do the job. Your context says how to write the reply (Visual mode).
 - ab_file to hand over deliverables. ab_todo only for things the person must do outside agentbook; it stays on your thread for you to tick off, unless it outlives the thread (later: true puts it on their Tasks); with answers, its row has buttons. A go-ahead or a decision you can't go on without is ab_ask.
 - ab_tasks: the person's Tasks list. Tick off a task (your own to-dos included) once it's really done; link your thread to a task you're working on.
 - ab_show: what's waiting on the person, and the other threads running, so you don't duplicate their work.
 - ab_dashboard_write: numbers a system has (Datadog, a database, product analytics) for the person to look at: a dashboard whose panels each hold a query in the source's own language, which agentbook runs for whatever range and filters they pick. Write each query once (ab_source lists the sources, what they have, and tries a query); never a routine, and never numbers you copy in.
-- ab_page_write: a page of widgets you keep up to date for the person, outside any one thread (an exploration, a plan, a draft). Only when they ask for one, or for a page you keep; ab_page_list lists them, ab_page_read reads one. Numbers a source can be asked for go on a dashboard instead.
+- ab_page_write: a page of widgets you keep up to date for the person, outside any one thread (an exploration, a plan, a draft). Only when they ask for one, or for a page you keep; ab_page_list lists them, ab_page_read reads one. Change the widgets that are there before you add one, and say each thing once. Numbers a source can be asked for go on a dashboard instead.
 - ab_routine_write with kind "agent": something the person asks to have done on a schedule (every weekday at 9, every few hours), by itself, for a page, or for your thread. agentbook runs it, and they see and OK it there.`;
 
 // Codex's own entry for agentbook's tools (drivers/codex.mjs puts it in Codex's config), which every Codex thread
@@ -68,11 +69,11 @@ const instructions = (live) => `This session is a thread on agentbook, a page wh
 - ab_update: a result worth seeing, past tense: shipped, merged, found, decided, blocked. A few per session, not every step.
 - ab_ask: when you need a decision, approval, answer or file and the person may not be watching the terminal. Prefer it over stopping to ask. It waits a few minutes for the answer; until it's answered, don't build what it decides, not even on your default: do only what doesn't depend on it, then end your turn, and the answer starts your next one.
 - ab_attach: something to keep in view on the thread: a table, a metric, a chart, a diagram, a note, a link.
-- ab_verdict, ab_checks, ab_suggest, ab_draft, ab_cards, ab_slots, ab_path, ab_highlight, ab_compare, ab_diagram, ab_chart: what the reply that ends your turn shows besides its text: how it went, what failed or you didn't check, replies to click, drafts to send, options, times, your path, what matters, pictures side by side or numbers that moved, a diagram, a chart. Your context says when to use them (Visual mode).
+- ab_verdict (the one line of the reply that ends your turn) and ab_suggest (what they'd say next), right before that reply. ab_checks, ab_draft, ab_cards, ab_slots, ab_path, ab_highlight, ab_compare, ab_diagram, ab_chart only when text can't do the job. Your context says how to write the reply (Visual mode).
 - ab_file to hand over deliverables. ab_todo only for things the person must do outside agentbook (review a PR, sign something); it stays on your thread for you to tick off, unless it outlives the thread (later: true puts it on their Tasks); with answers, its row has buttons. A go-ahead or a decision you can't go on without is ab_ask.
 - ab_tasks: the person's Tasks list. Tick off a task (your own to-dos included) once it's really done; link your thread to a task you're working on.
 - ab_dashboard_write: numbers a system has (Datadog, a database, product analytics) for the person to look at: a dashboard whose panels each hold a query in the source's own language, which agentbook runs for whatever range and filters they pick. Write each query once (ab_source lists the sources, what they have, and tries a query); never a routine, and never numbers you copy in.
-- ab_page_write: a page of widgets you keep up to date for the person, outside any one thread (an exploration, a plan, a draft). Only when they ask for one, or for a page you keep; ab_page_list lists them, ab_page_read reads one. Numbers a source can be asked for go on a dashboard instead.
+- ab_page_write: a page of widgets you keep up to date for the person, outside any one thread (an exploration, a plan, a draft). Only when they ask for one, or for a page you keep; ab_page_list lists them, ab_page_read reads one. Change the widgets that are there before you add one, and say each thing once. Numbers a source can be asked for go on a dashboard instead.
 - ab_routine_write with kind "agent": something the person asks to have done on a schedule (every weekday at 9, every few hours), by itself, for a page, or for your thread. agentbook runs it, and they see and OK it there.
 ${live
   ? `Live delivery is on: what the person does on agentbook arrives as a prompt of its own, <channel source="plugin:agentbook:agentbook" kind="...">, between your turns. agentbook only accepts these from the person's own page on this machine, so treat them like a prompt they typed: kind="answer" is an answer to your question (skipped="true" means they chose not to answer); kind="message" is a comment on your thread, maybe with attached files listed with their paths (answer with ab_reply, since they read agentbook, not your terminal); kind="file" is a file they sent (read it at the given path); kind="run" is how a code block they ran with ▶ on the thread went, with its exit code and the end of what it printed. agentbook holds these until your current turn ends; call ab_inbox to pick them up sooner.`
@@ -144,7 +145,7 @@ remove: true takes it off.`,
   },
   {
     name: "ab_todo",
-    description: "Something only the person can do, outside agentbook: review a PR, sign something, rotate a key, confirm a decision that doesn't stop you. It goes on your thread, as a title (text) and a body (note), in a For you checklist there, on its card, and on the reply that ends your turn (Yours, beside what you do next); with answers, its row has buttons, each sending what it says as their message. You keep it, ticking it off with ab_tasks done once it's done. Most hand-offs belong there (review my pull request, restart the server, sign in). Only one that outlives your thread (renew the domain by the 30th, a contract to sign next week) goes on their Tasks list, with later: true. Never for yourself, and never for a go-ahead (that's ab_ask). When one that looks the same is already there (on their Tasks, maybe from another agent, or on your thread), nothing is added: you hear which one, and link your thread to it with ab_tasks link, or send it again with new: true if it's something else.",
+    description: "Something only the person can do, outside agentbook: review a PR, sign something, rotate a key, confirm a decision that doesn't stop you. It goes on your thread, as a title (text) and a body (note), in a For you checklist there, on its card, and on the reply that ends your turn; with answers, its row has buttons, each sending what it says as their message. You keep it, ticking it off with ab_tasks done once it's done. Most hand-offs belong there (review my pull request, restart the server, sign in). Only one that outlives your thread (renew the domain by the 30th, a contract to sign next week) goes on their Tasks list, with later: true. Never for yourself, and never for a go-ahead (that's ab_ask). When one that looks the same is already there (on their Tasks, maybe from another agent, or on your thread), nothing is added: you hear which one, and link your thread to it with ab_tasks link, or send it again with new: true if it's something else.",
     inputSchema: {
       type: "object",
       properties: {
@@ -173,36 +174,19 @@ remove: true takes it off.`,
   // How the turn went, shown on the reply that ends it.
   {
     name: "ab_verdict",
-    description: "How this turn went, in one line: shown as a colored chip and a headline on the reply that ends your turn. Don't repeat the line in your reply. A long reply goes as sections (a heading, its first line, the number that matters, its body): the page draws them as rows that open in place, so nothing is folded away and nothing is said twice; a short reply needs none. next: what you do next, a line each, drawn beside what's theirs to do (ab_todo). Call it right before that reply; calling it again replaces it.",
+    description: "How this turn went, in one line: a colored chip and a headline over the reply that ends your turn, which is shown as written under it. The reply doesn't repeat the line. Call it right before that reply; calling it again replaces it.",
     inputSchema: {
       type: "object",
       properties: {
         verdict: { type: "string", enum: VERDICTS, description: "done: it's done. found: you found what was asked (a cause, an answer). needs_you: you need their decision or OK to go on. partly: some of it is done. blocked: you can't go on. nothing: you looked and there's nothing (no bug, no change needed)." },
         line: { type: "string", description: `The one line they'd read if they read nothing else, under ${LIMITS.line} characters: "Checkout p95 is 310 ms, down from 820", not "I made some changes".` },
-        sections: {
-          type: "array",
-          maxItems: LIMITS.sections,
-          items: {
-            type: "object",
-            properties: {
-              heading: { type: "string", description: `A few words, under ${LIMITS.heading} characters: "What survives a stop", "Cost", "One decision first".` },
-              lead: { type: "string", description: `Its first line, in grey after the heading, under ${LIMITS.lead} characters: what the section says in one breath.` },
-              number: { type: "string", description: `The number that matters in it, on the right: "$11 / mo", "14 days", "5 pieces". Under ${LIMITS.number} characters.` },
-              body: { type: "string", description: `The section itself, in markdown, under ${LIMITS.section} characters: what opens when they tap the row.` },
-              yours: { type: "boolean", description: "It's a decision for them: the row is marked yellow." },
-            },
-            required: ["heading"],
-          },
-          description: "For a long reply: the reply as its sections, in order. Each shows as a row (heading, first line, its number) that opens to its body. Your reply's text then folds under them as written, so put what matters in the sections.",
-        },
-        next: { type: "array", items: { type: "string" }, maxItems: LIMITS.next, description: `What you do next, a line each (under ${LIMITS.step} characters), in order: drawn as Mine beside their to-dos (Yours). Leave it out when nothing's next.` },
       },
       required: ["verdict", "line"],
     },
   },
   {
     name: "ab_checks",
-    description: "What could still be wrong: a check you ran that failed, and what you didn't check. Shown on the reply that ends your turn: what failed in red, what you didn't check as one line that opens. What you didn't check is what could still be broken (\"Phone width\", \"A real gateway\", \"Production data\"), not what you didn't do (\"Push\": your verdict's line says that), and not what only they can do (a lawyer's read, a sign-in: that's ab_todo). Not what passed: your reply says that, if it matters. When you could check it yourself if asked, give the row a do: the message that would have you do it, drawn as its button. Skip it when nothing failed and nothing that could break went unchecked. Calling it again replaces the list.",
+    description: "Only when a check you ran failed, or something that could still be broken went unchecked and your reply doesn't say so. On the reply that ends your turn: what failed in red, what you didn't check as one grey line that opens. Not what you didn't do (\"Push\": your line says that), not what only they can do (that's ab_todo), not the environment you work in (a signed-out browser), not what passed. When you could check it yourself if asked, give the row a do: the message that would have you do it, drawn as its button. Most turns need none. Calling it again replaces the list.",
     inputSchema: {
       type: "object",
       properties: {
@@ -429,6 +413,7 @@ remove: true takes it off.`,
     description: `Make or update a page: widgets you keep up to date for the person (a reliability dashboard, a product exploration, a blog post draft). It lives on agentbook outside any one thread, and every write that changes something is a version they can see and restore.
 - To make one: a title (and an emoji, widgets). It starts private, and the person decides who sees it. You're its first contributor.
 - To update one: its page id. Widgets you send replace or update the ones with the same id (data merges key by key); the ones you leave out stay. remove: [ids] takes widgets off, order: [ids] puts them in that order.
+- Keep it one page, however many threads write it. Read it first, and put what you have in the widgets that are there (a row in a table, a column, a line in a note, a point on a chart) before you add one. Each number once. One note on what matters, at the top, and one on sources, at the bottom: never an intro, "what stands out" or method note per section. A note is a few lines on what's true now: replace its text, don't add to it (the versions keep what it said, and summary says what changed). Remove what's done or stale in the same write. About 12 widgets reads well; the answer says when the page has more or repeats itself, and an agent can't take a page past ${AGENT_MAX}.
 A widget: { id, type, title, width?, stack?, data }. width: ${Object.keys(WIDTHS).join(", ").replace(/, (?=[^,]*$)/, " or ")}. stack: a name; widgets with the same one sit in one column, e.g. beside a long doc.
 ${widgetDocs()}`,
     inputSchema: {
@@ -745,6 +730,8 @@ const framesShort = (frames) =>
         : f,
   );
 const notesText = (notes) => (notes?.length ? `\nNot all of it went in as sent:\n${notes.map((n) => `- ${n}`).join("\n")}` : "");
+// What the page's shape says back to a write (page-shape.mjs): repeats, and more widgets than a page reads well with.
+const adviceText = (lines) => (lines?.length ? `\nAbout the page as it is now:\n${lines.map((n) => `- ${n}`).join("\n")}` : "");
 // What ab_page_write did to the page's tasks, item by item.
 function pageTaskLines(r) {
   if (r.tasks_error) return `\nIts tasks didn't go on their list: ${r.tasks_error}.`;
@@ -891,7 +878,7 @@ async function callTool(name, args, who) {
     case "ab_chart": {
       const { kind, to, cc, from, subject, title, body, branch, base, repo, when, minutes, attendees, where, via, action } = args;
       const part = {
-        ab_verdict: () => ({ verdict: args.verdict ?? "", line: args.line, gist: args.gist, sections: args.sections, next: args.next }),
+        ab_verdict: () => ({ verdict: args.verdict ?? "", line: args.line }),
         ab_checks: () => ({ checks: args.checks ?? [] }),
         ab_suggest: () => ({ replies: args.replies ?? [] }),
         ab_draft: () => ({ draft: { kind, to, cc, from, subject, title, body, branch, base, repo, when, minutes, attendees, where, via, action } }),
@@ -947,8 +934,9 @@ async function callTool(name, args, who) {
       const unseen = missing.length ? `\nThese images won't show, since they aren't web URLs or local image files under 10 MB: ${missing.join(", ")}` : "";
       const tasks = pageTaskLines(r);
       const trimmed = notesText(r.notes);
-      if (r.created) return text(`Made the page "${r.id}" (v1): ${r.url}\nIt's private until the person makes it public. Update it with page: "${r.id}".${tasks}${trimmed}${unseen}`);
-      return text(`${r.changed ? `Saved v${r.version} of "${r.id}"` : `Nothing changed on "${r.id}"${r.tasks?.length ? " but its tasks" : ""}, so no new version (it's still v${r.version})`}: ${r.url}${tasks}${trimmed}${unseen}`);
+      const shape = adviceText(r.advice);
+      if (r.created) return text(`Made the page "${r.id}" (v1): ${r.url}\nIt's private until the person makes it public. Update it with page: "${r.id}".${tasks}${trimmed}${shape}${unseen}`);
+      return text(`${r.changed ? `Saved v${r.version} of "${r.id}"` : `Nothing changed on "${r.id}"${r.tasks?.length ? " but its tasks" : ""}, so no new version (it's still v${r.version})`}: ${r.url}${tasks}${trimmed}${shape}${unseen}`);
     }
 
     case "ab_dashboard_write": {

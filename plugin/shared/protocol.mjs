@@ -124,6 +124,8 @@ const POST_FIELDS = {
   "channel?": B,
   "launch?": { type: "string", max: 300, nullable: true },
   "cloud?": { type: "string", max: 40, nullable: true },
+  // Claude Desktop ("desktop") or VS Code ("vscode"), where what's typed into it is typed.
+  "app?": { type: "string", enum: ["desktop", "vscode"], nullable: true },
   "url?": { type: "string", max: 2000, nullable: true },
   "prompt?": { type: "string", max: 12000, nullable: true },
   "started?": S(40),
@@ -132,7 +134,7 @@ const POST_FIELDS = {
 
 export const OPS = {
   "post.hello": { t: "session.hello", fields: POST_FIELDS, makes: (op) => [["post", op.session_id || op.proc], ["agent", op.agent]] },
-  "post.status": { t: "session.status", fields: { post: ID, "state?": S(40), "text?": S(400), "turn?": S(10), "transcript?": S(2000), "failed?": { type: "string", max: 40, nullable: true } } },
+  "post.status": { t: "session.status", fields: { post: ID, "state?": S(40), "text?": S(400), "turn?": S(10), "transcript?": S(2000), "failed?": { type: "string", max: 40, nullable: true }, "app?": { type: "string", enum: ["desktop", "vscode"] } } },
   "post.gone": { t: "session.gone", fields: { post: ID, "reason?": S(200), "ended?": S(40) } },
   "post.sleep": { t: "session.sleep", fields: { post: ID, "reason?": S(200) } },
   "post.post": { t: "session.post", fields: { post: ID, "title?": S(200), "text?": { type: "string", max: 8000, nullable: true } } },
@@ -146,9 +148,11 @@ export const OPS = {
   "post.landed": { t: "session.landed", fields: { post: ID, branch: S(300) } },
   "post.skills": { t: "session.skills", fields: { post: ID, skills: ARR(OBJ(8192), 400, 512 * 1024) } },
   "post.model": { t: "session.model", fields: { post: ID, model: { type: "string", max: 80, nullable: true } } },
+  // The thread it was started from: a Claude Desktop session another one started (cli/desktop.mjs).
+  "post.from": { t: "session.from", fields: { post: ID, started_from: ID } },
   // A copy of its conversation Claude Code started on a resume (`copy`, its session id or the start of it): it's this
   // post, and with `follow` the post goes on in it.
-  "post.fold": { t: "session.fold", fields: { post: ID, copy: ID, "follow?": B } },
+  "post.fold": { t: "session.fold", fields: { post: ID, copy: ID, "follow?": B, "session_id?": S(200) } },
   // Its queue held: "stopped" (you stopped it), "ended" (its session ended), "you" (you paused it), or null.
   "post.paused": { t: "session.paused", fields: { post: ID, paused: { type: "string", max: 20, nullable: true } } },
   "post.snapshot": { t: "session.snapshot", fields: { post: ID, "ai_title?": { type: "string", max: 400, nullable: true }, "model?": { type: "string", max: 120, nullable: true }, "plan?": ANY(128 * 1024), "stats?": ANY(16 * 1024), "context?": ANY(16 * 1024), "skill_uses?": ANY(64 * 1024), "started?": S(40), "prs?": OBJ(64 * 1024), "loops?": ARR(OBJ(64 * 1024), 100, 512 * 1024) } },
@@ -256,7 +260,7 @@ export const STATE = {
     id: KEY,
     updated: KEY,
     ...Object.fromEntries(
-      ["agent", "label", "proc", "session_id", "title", "text", "prompt", "ai_title", "doing", "state", "failed", "started", "ended", "end_reason", "turn_started", "turn_ended", "slept", "sleep_reason", "cwd", "root", "repo", "branch", "host", "transcript", "launch", "cloud", "url", "model", "model_pick", "archived_at", "hidden_at", "pinned_at", "landed", "queue_paused", "visibility"].map((k) => [`${k}?`, T]),
+      ["agent", "label", "proc", "session_id", "title", "text", "prompt", "ai_title", "doing", "state", "failed", "started", "ended", "end_reason", "turn_started", "turn_ended", "slept", "sleep_reason", "cwd", "root", "repo", "branch", "host", "transcript", "launch", "cloud", "app", "started_from", "url", "model", "model_pick", "archived_at", "hidden_at", "pinned_at", "landed", "queue_paused", "visibility"].map((k) => [`${k}?`, T]),
     ),
     ...Object.fromEntries(["archived", "hidden", "pinned", "asleep", "busy", "channel", "show_work"].map((k) => [`${k}?`, TB])),
     "rev?": TN,
@@ -410,7 +414,7 @@ export const COMMANDS = {
   // Who else may steer one of its agents: its owner's passkey signs giving it; taking it
   // back needs no signature.
   "operators.change": { steer: true, expires: 7 * 86400e3, fields: { change: OBJ(64 * 1024) } },
-  "openclaw.pair": { steer: true, secret: true, expires: 600e3, fields: { "disconnect?": B, "setup_code?": S(8000), "url?": S(500), "token?": S(500), "password?": S(500) } },
+  "openclaw.pair": { steer: true, secret: true, expires: 600e3, fields: { "disconnect?": B, "admin?": B, "setup_code?": S(8000), "url?": S(500), "token?": S(500), "password?": S(500) } },
   // An agent that runs on its vendor's computers (Claude Agent, Devin), connected on this machine: its key and what
   // goes with it stay here and never come back out.
   "remote.connect": { steer: true, secret: true, expires: 600e3, fields: { vendor: S(20), "disconnect?": B, "key?": S(500), "org?": S(200), "github_token?": S(500), "budget?": S(20) } },

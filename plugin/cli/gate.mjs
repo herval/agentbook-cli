@@ -199,7 +199,7 @@ export function createGate({ home, roots = () => [], readRoots = roots, postOf =
     const pages = Array.isArray(e.pages) ? e.pages.filter((p) => p && typeof p.id === "string").slice(0, 20) : [];
     return [
       `This is a run of the routine "${String(e.name || e.rid).slice(0, 200)}" on agentbook. ${reason}`,
-      pages.length ? `It's linked to ${pages.length === 1 ? "the page" : "the pages"} ${pages.map((p) => `"${String(p.title || p.id).slice(0, 120)}" (${p.id})`).join(", ")}: read ${pages.length === 1 ? "it" : "them"} with ab_page_read and update ${pages.length === 1 ? "it" : "them"} with ab_page_write.` : "",
+      pages.length ? `It's linked to ${pages.length === 1 ? "the page" : "the pages"} ${pages.map((p) => `"${String(p.title || p.id).slice(0, 120)}" (${p.id})`).join(", ")}: read ${pages.length === 1 ? "it" : "them"} with ab_page_read and update ${pages.length === 1 ? "it" : "them"} with ab_page_write: change the widgets that are there, and add none unless the prompt asks for ${pages.length === 1 ? "it" : "them"}.` : "",
       unwatched("its owner"),
     ].filter(Boolean).join(" ");
   }

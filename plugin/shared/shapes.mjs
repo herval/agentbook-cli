@@ -1,6 +1,5 @@
 // How an agent's turn went, as it says it with its ab_* tools: what the page shows on the
-// reply that ends the turn, so the person reads that before its text, or instead of it. ab_verdict (its line, the reply
-// as sections that open, what it does next),
+// reply that ends the turn, over its text. ab_verdict (its line),
 // ab_checks, ab_suggest; and what it made or found for them: ab_draft (an email, a pull request, an invite, a
 // message), ab_cards (places, products, prices against a limit), ab_slots (times to pick from), ab_path (the stages
 // it went through, dead ends too) and ab_highlight (what matters in its reply, or in what it read); and what the work
@@ -21,7 +20,7 @@ export const DRAFTS = ["email", "pull_request", "invite", "message"];
 // How its cards are picked: several (they can go together, the default): their buttons pick, and Continue sends what
 // you picked as one message; one (they're alternatives): a button sends at once.
 export const PICKS = ["several", "one"];
-export const LIMITS = { line: 200, gist: 3, sections: 8, heading: 80, lead: 200, number: 24, section: 2000, next: 8, step: 120, checks: 12, label: 80, detail: 600, do: 100, replies: 6, reply: 100, drafts: 3, body: 6000, cards: 6, series: 90, slots: 60, stages: 12, items: 8, passage: 1200, numbers: 6 };
+export const LIMITS = { line: 200, gist: 3, checks: 12, label: 80, detail: 600, do: 100, replies: 6, reply: 100, drafts: 3, body: 6000, cards: 6, series: 90, slots: 60, stages: 12, items: 8, passage: 1200, numbers: 6 };
 // What a compare shows: one frame with a handle to drag between before and after; options side by side to pick from;
 // the same screen at a desktop's size and a phone's; numbers that moved, from what they were to what they are.
 export const COMPARES = ["before_after", "options", "sizes", "numbers"];
@@ -188,25 +187,7 @@ function chartOf(c) {
   return { chart: { ...(text(title, 120) ? { title: text(title, 120) } : {}), ...kept }, notes: noteLines(out.notes) };
 }
 
-// The reply as an outline: its sections, each a heading, its first line, the number
-// that matters in it and its body in markdown; `yours` marks one that's a decision for the person. The page draws
-// them as rows that open in place, instead of a gist with the text folded under it.
-function sectionsOf(v) {
-  if (v == null) return { sections: [] };
-  if (!Array.isArray(v)) return fail("sections must be a list of { heading, lead?, number?, body?, yours? }");
-  const sections = [];
-  for (const s of v.slice(0, LIMITS.sections)) {
-    const heading = text(s?.heading, LIMITS.heading);
-    if (!heading) return fail("each section needs a heading");
-    const lead = text(s.lead, LIMITS.lead);
-    const number = text(s.number, LIMITS.number);
-    const md = body(s.body, LIMITS.section);
-    sections.push({ heading, ...(lead ? { lead } : {}), ...(number ? { number } : {}), ...(md ? { body: md } : {}), ...(s.yours ? { yours: true } : {}) });
-  }
-  return { sections };
-}
-
-// What it sent ({ verdict, line, sections, next, gist }, { checks }, { replies }, { draft }, { cards }, { slots }, { stages },
+// What it sent ({ verdict, line, gist }, { checks }, { replies }, { draft }, { cards }, { slots }, { stages },
 // { items, source? }, { compare }, { diagram }, { chart }), checked and trimmed, as { shape } with the parts it sent
 // (and `notes`, what was left out of it); or { error } saying what's wrong, so it can send it again right.
 export function shapeOf(b) {
@@ -216,13 +197,9 @@ export function shapeOf(b) {
     if (!VERDICTS.includes(b.verdict)) return fail(`verdict must be one of ${VERDICTS.join(", ")}`);
     const line = text(b.line, LIMITS.line);
     if (!line) return fail("line is required: how it went, in one line");
-    // `gist`: from older plugins; the page shows it only when there are no sections.
+    // `gist`: from older plugins, kept and not drawn: the reply itself shows under the line.
     const gist = list(b.gist, LIMITS.gist, 240);
-    const r = sectionsOf(b.sections);
-    if (r.error) return r;
-    // `next`: what it does next, a line each, drawn beside what's the person's to do (C).
-    const next = list(b.next, LIMITS.next, LIMITS.step);
-    shape.verdict = { kind: b.verdict, line, ...(gist.length ? { gist } : {}), ...(r.sections.length ? { sections: r.sections } : {}), ...(next.length ? { next } : {}) };
+    shape.verdict = { kind: b.verdict, line, ...(gist.length ? { gist } : {}) };
   }
   if (b.checks != null) {
     if (!Array.isArray(b.checks) || !b.checks.length) return fail("checks must be a list of { status, label, detail? }");

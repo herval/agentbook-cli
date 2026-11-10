@@ -156,7 +156,7 @@ export function vouch(res, key, nonce, port, who = ownListener, { proved = prove
   return { how: "unchecked" };
 }
 const notAgentbook = (port) =>
-  Object.assign(new Error(`Something other than this machine's agentbook-cli answers on port ${port}, so agentbook doesn't use what it says. Stop it, and agentbook-cli up starts agentbook-cli again.`), { code: NOT_AGENTBOOK });
+  Object.assign(new Error(`Something other than this machine's agentbook-cli answers on port ${port}, so agentbook doesn't use what it says. Stop it, and agentbook-cli up starts agentbook-cli again; or give agentbook-cli another port, with AGENTBOOK_PORT in your shell's profile.`), { code: NOT_AGENTBOOK });
 // `pid`: what listens, when it's this person's, for stopUnproved.
 const unproved = (port, pid) =>
   Object.assign(new Error(`What answers on port ${port} doesn't prove it's this machine's agentbook-cli, as agentbook-cli here has before, so agentbook doesn't use what it says. agentbook-cli up stops an older agentbook-cli there and starts this one; anything else, stop it.`), { code: NOT_AGENTBOOK, unproved: true, pid });
@@ -182,6 +182,18 @@ export async function stopUnproved(e, ms = 2500) {
   return false;
 }
 
+// Whether what answered at `u` says it's agentbook, as agentbook-cli's /api/health does (and an agentbook from before
+// the split did): from this answer when it is that route's, else by asking it. One that can't be asked just now (it
+// stopped, or it's slow) is left to the caller, as before.
+async function saysAgentbook(res, u) {
+  try {
+    const health = u.pathname === "/api/health" ? res.clone() : await fetch(`${u.origin}/api/health`, { signal: AbortSignal.timeout(700) });
+    return (await health.json().catch(() => null))?.name === "agentbook";
+  } catch {
+    return true;
+  }
+}
+
 // A call to agentbook-cli on this machine: signed, and its answer checked (vouch). -> { res, how, pid }. To an
 // address elsewhere (a hub), as it was.
 export async function localFetch(url, { method = "GET", body, headers = {}, signal } = {}) {
@@ -192,7 +204,11 @@ export async function localFetch(url, { method = "GET", body, headers = {}, sign
   const res = await fetch(url, { method, headers: { ...headers, ...(sig ? { [AUTH_HEADER]: sig.auth } : {}) }, body, signal });
   if (!local) return { res, how: "unchecked" };
   try {
-    return { res, ...vouch(res, key, sig?.nonce, Number(u.port) || 80) };
+    const v = vouch(res, key, sig?.nonce, Number(u.port) || 80);
+    // With no proof, what listens being this person's isn't enough: their own dev server on agentbook-cli's port is
+    // theirs too, and its 404s read as an agentbook-cli that isn't logged in. It has to say it's agentbook.
+    if (v.how !== "proof" && !(await saysAgentbook(res, u))) throw notAgentbook(Number(u.port) || 80);
+    return { res, ...v };
   } catch (e) {
     res.body?.cancel().catch(() => {});
     throw e;
@@ -268,10 +284,18 @@ export function channelMode() {
   return process.env.AGENTBOOK_CHANNEL === "1";
 }
 
-// `claude -p` runs (scripts, title generators) stay off agentbook unless AGENTBOOK_HEADLESS=1.
+// `claude -p` runs (scripts, title generators) stay off agentbook unless AGENTBOOK_HEADLESS=1. Sessions someone
+// types into are threads: a terminal's (cli), Claude Desktop's Code tab (claude-desktop) and VS Code's (claude-vscode).
+const TYPED_INTO = new Set(["cli", "claude-desktop", "claude-vscode"]);
 export function headless() {
   const entry = process.env.CLAUDE_CODE_ENTRYPOINT;
-  return !!entry && entry !== "cli" && process.env.AGENTBOOK_HEADLESS !== "1";
+  return !!entry && !TYPED_INTO.has(entry) && process.env.AGENTBOOK_HEADLESS !== "1";
+}
+// The app a session someone types into runs in, when it isn't a terminal: "desktop" or "vscode". The page says
+// "in Desktop" for what's typed there, not "in the terminal".
+export function appOf() {
+  const entry = process.env.CLAUDE_CODE_ENTRYPOINT;
+  return entry === "claude-desktop" ? "desktop" : entry === "claude-vscode" ? "vscode" : undefined;
 }
 
 // An agent agentbook runs through a driver (Codex, Hermes) starts this MCP server with its post named in
@@ -482,7 +506,7 @@ export async function hello(extra = {}) {
   const me = identity();
   const cwd = extra.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const known = extra.session_id || driven() ? null : claudeSession(me.pid);
-  const res = await api("POST", "/api/hello", { ...me, cwd, ...gitInfo(cwd), channel: channelMode(), launch: process.env.AGENTBOOK_LAUNCH_ID || undefined, ...extra, ...(known ? { session_id: known } : {}) });
+  const res = await api("POST", "/api/hello", { ...me, cwd, ...gitInfo(cwd), channel: channelMode(), app: appOf(), launch: process.env.AGENTBOOK_LAUNCH_ID || undefined, ...extra, ...(known ? { session_id: known } : {}) });
   return { ...me, ...res };
 }
 

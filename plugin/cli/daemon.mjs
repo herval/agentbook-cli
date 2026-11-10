@@ -17,6 +17,7 @@ import { claudeCommands, claudeModels, cleanEnv, createClaude, learnCommand, ope
 import { cloudSessionId, codexTaskId, createCloud } from "./drivers/cloud.mjs";
 import { createCodex } from "./drivers/codex.mjs";
 import { createClaudeRoutines } from "./drivers/claude-routines.mjs";
+import { desktopStarts } from "./desktop.mjs";
 import { createHermes } from "./drivers/hermes.mjs";
 import { createDsh } from "./drivers/dsh.mjs";
 import { createManaged } from "./drivers/managed.mjs";
@@ -53,7 +54,7 @@ import { localPicture, picture, readPicture } from "../shared/pictures.mjs";
 import { isLevel } from "../shared/visibility.mjs";
 import { accept as acceptWs, refuse as refuseWs } from "../shared/ws.mjs";
 import { AUTH_HEADER, AUTH_WINDOW_MS, PROOF_HEADER, checkRequest, proofOf } from "../shared/local-auth.mjs";
-import { redact, redactDeep, secretFileRefusal } from "./redact.mjs";
+import { redact, redactDeep, secretFile, secretFileRefusal } from "./redact.mjs";
 import { createFileKeep } from "./file-keep.mjs";
 
 const MAX_BODY = 80 * 1024 * 1024;
@@ -775,6 +776,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
       if (a.state === "failed") commit({ t: "session.gone", post: s.id, reason: "Failed" });
       else asleep(s.id);
     }
+    blockedOnLogin();
     // An ended thread you wrote on, whose resume Claude Code gave up on: it says why, instead of "Resuming it" and
     // then nothing.
     for (const lid of resumes) {
@@ -941,7 +943,9 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   // you send meanwhile goes with that prompt (its hook takes it), rather than resuming it again.
   // One woken with a slash command has no prompt to wait for (one that prints starts no turn): it's up once it says hello.
   const commandLaunches = new Set();
-  const starting = (s) => Object.values(state.launches).some((l) => l.resume && l.post === s.id && !l.error && !l.mirrored && !commandLaunches.has(l.id) && Date.now() - Date.parse(l.at) < RESUME_WAIT_MS);
+  // A wake its thread failed after is over too, though no session took it (blockedOnLogin: no hook ever came).
+  const failedSince = (s, l) => !!s.failed && Date.parse(s.failed.at) >= Date.parse(l.at);
+  const starting = (s) => Object.values(state.launches).some((l) => l.resume && l.post === s.id && !l.error && !l.mirrored && !commandLaunches.has(l.id) && !failedSince(s, l) && Date.now() - Date.parse(l.at) < RESUME_WAIT_MS);
   async function wakeIdle(s) {
     if (s.state === "done" || s.busy || s.state === "waiting" || waking.has(s.id) || sleeping.has(s.id) || holdMs(s.id) > 0 || starting(s)) return;
     if (!s.asleep && !claude.running(claude.info(s.session_id))) return;
@@ -1073,6 +1077,30 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
       loginWatcher = null;
     }
   }
+  // A session with no Claude Code login at all (none saved, or one it couldn't renew: boat-littleguys after two days
+  // stopped) answers "Login expired" by itself, before its turn starts, and runs no hook: no prompt hook, no
+  // StopFailure. Woken that way, its thread said nothing, and what you sent sat in a copy nothing would resume
+  // (2026-11-10). Claude Code lists that session as blocked and saves why, so the thread goes on in the newest one
+  // (where what you sent is) and is cut off as an expired login, as StopFailure would have said: it needs you, with its
+  // Sign in, and it's picked up once you've signed in again. Only a block since its last turn started or ended counts.
+  const LOGIN_SAID = /log ?in|logged out/i;
+  function blockedOnLogin() {
+    for (const s of Object.values(state.sessions)) {
+      if (s.state === "done" || s.busy || s.failed?.error === LOGIN || driverOf(s) || s.cloud || !s.session_id) continue;
+      const since = Math.max(Date.parse(s.turn_started) || 0, Date.parse(s.turn_ended) || 0);
+      const b = [s.session_id, ...(s.copies || [])]
+        .map((id) => claude.blocked(id))
+        .filter((x) => x && x.at > since && LOGIN_SAID.test(x.detail))
+        .sort((x, y) => y.at - x.at)[0];
+      if (!b) continue;
+      waking.delete(s.id);
+      if (b.sessionId && b.sessionId !== s.session_id) commit({ t: "session.fold", post: s.id, copy: b.id, follow: true, session_id: b.sessionId });
+      commit({ t: "session.status", post: s.id, state: "idle", text: b.detail, turn: "end", failed: LOGIN });
+      log(`${s.label}: Claude Code isn't signed in on ${MACHINE} (${b.detail}), so it waits for you to sign in`);
+      if (pickable(state.sessions[s.id])) cutOff(s.id);
+    }
+  }
+
   // Whether Claude's API answers from here (any answer at all): until it does, a resume would fail the same way.
   async function apiAnswers() {
     try {
@@ -1401,7 +1429,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   }
   // Visual mode, for every agent: what its sessions are told
   // when they start (contextFor), and reminded of as each turn starts.
-  const VISUAL_REMINDER = "agentbook, Visual mode: the person reads this turn's reply at a glance. Right before your final reply, call ab_verdict (one line, which your reply doesn't repeat; a long reply goes as sections, each a heading, a first line and its number; next: what you do next), ab_checks (what failed, and what you didn't check: not what's theirs to do, that's ab_todo, with answers for a decision) and ab_suggest (what they'd likely say next); and when it fits, show rather than tell: ab_draft (something to send, for their OK), ab_cards (options, prices), ab_slots (times), ab_path (what you tried, dead ends too), ab_highlight (what matters), ab_compare (screenshots side by side, numbers that moved), ab_diagram (boxes and arrows), ab_chart (numbers as lines or bars). Skip them for a one-line answer.";
+  const VISUAL_REMINDER = "agentbook, Visual mode: the person reads this turn's reply at a glance, on a phone. The answer in the first sentence, then only what changes their next move, in whole sentences, nothing twice, under 120 words unless they asked for detail. Right before it: ab_verdict (the one line, which the reply doesn't repeat) and ab_suggest (what they'd say next). Other shapes only when text can't do it: ab_checks for a failed check, ab_todo with answers for a decision of theirs, ab_compare for pictures or numbers, ab_cards for alternatives, ab_draft for something to send.";
   // The agents that can write pages: the ones agentbook gives its MCP server to.
   const PAGE_WRITERS = ["claude-code", "codex"];
   route("GET", "/api/procs/:proc/context", async (req, res, { params, query }) => {
@@ -1459,6 +1487,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
       pid: b.pid,
       host: b.host,
       channel: !!b.channel,
+      app: b.app === "desktop" || b.app === "vscode" ? b.app : undefined,
       launch: b.launch ? str(b.launch, 40) : undefined,
     };
     // Private terminals: a session agentbook didn't start gets no thread. One agentbook may have just started is
@@ -1473,7 +1502,28 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     commit(op);
     const key = state.procs[b.proc];
     said({ post: key, label: state.sessions[key].label });
+    // A Claude Desktop session may have been started by another: its thread says which.
+    if (op.app === "desktop" && !state.sessions[key].started_from) linkDesktop(key).catch((e) => log(`desktop: ${e.message}`));
   });
+
+  // Claude Desktop sessions another one started (desktop.mjs): each one's thread says the thread it was started from,
+  // all of them as agentbook-cli starts (those from before it ran), and each new one as it says hello. `only`: just
+  // that thread.
+  const threadOfSession = (sid) => (sid && (foldedInto(state, sid) || (state.sessions[sid] ? sid : Object.values(state.sessions).find((s) => s.session_id === sid)?.id))) || null;
+  async function linkDesktop(only = null) {
+    let starts;
+    try {
+      starts = await desktopStarts();
+    } catch (e) {
+      return log(`desktop: couldn't read its sessions: ${e.message}`);
+    }
+    for (const [sid, { from }] of starts) {
+      const post = threadOfSession(sid);
+      if (!post || (only && post !== only) || state.sessions[post].started_from) continue;
+      const parent = from.map(threadOfSession).find((p) => p && p !== post);
+      if (parent) commit({ t: "session.from", post, started_from: parent });
+    }
+  }
 
   route("POST", "/api/procs/:proc/status", async (req, res, { params }) => {
     const b = await readBody(req);
@@ -1484,7 +1534,9 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     const transcript = typeof b.transcript === "string" && b.transcript !== state.sessions[post].transcript ? b.transcript : undefined;
     const failed = turn === "end" && b.failed ? str(b.failed, 40) : undefined;
     const ended = turn === "end" && state.sessions[post].busy; // its turn, not a reminder that it's idle
-    commit({ t: "session.status", post, state: states.includes(b.state) ? b.state : undefined, text: str(b.text, 200) || undefined, turn, transcript, failed });
+    // Where it's typed (appOf), said at each prompt for a thread that registered before agentbook kept it.
+    const app = turn === "start" && (b.app === "desktop" || b.app === "vscode") && b.app !== state.sessions[post].app ? b.app : undefined;
+    commit({ t: "session.status", post, state: states.includes(b.state) ? b.state : undefined, text: str(b.text, 200) || undefined, turn, transcript, failed, app });
     // Whether it runs in the background decides whether agentbook picks it up, so a session Claude Code's list
     // doesn't have yet is looked up first.
     if (failed && !claude.info(state.sessions[post].session_id)) await claude.refresh().catch(() => {});
@@ -2395,10 +2447,16 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   }
 
   // The files a scope of a post changed: "all", a turn ("3"), or a step ("s:<id>").
+  // A file that holds secrets (.env, a key, a login) is listed, and that it changed, but never its lines: a read of
+  // it is refused (secretFileRefusal), and its diff would carry the same to the server.
+  const keptSecret = (f) => {
+    const why = secretFile(f.abs || f.path);
+    return why ? { ...f, hunks: [], nodiff: true, secret: why } : f;
+  };
   function scoped(s, ed, scope) {
-    if (ed.cloud) return ed.cloud.map((f) => ({ path: f.path, kind: f.kind === "rename" ? "edit" : f.kind, ...sizeOf(f.hunks), edits: 1, exact: true, by: "edit", ...(f.binary ? { nodiff: true } : {}), hunks: f.hunks }));
+    if (ed.cloud) return ed.cloud.map((f) => ({ path: f.path, kind: f.kind === "rename" ? "edit" : f.kind, ...sizeOf(f.hunks), edits: 1, exact: true, by: "edit", ...(f.binary ? { nodiff: true } : {}), hunks: f.hunks })).map(keptSecret);
     const match = scope === "all" ? () => true : scope.startsWith("s:") ? (e) => e.step === scope.slice(2) : (e) => e.turn === Number(scope);
-    return changes.changes(s.id, ed.edits, s, scope, match, ed.disk);
+    return changes.changes(s.id, ed.edits, s, scope, match, ed.disk).map(keptSecret);
   }
   const scopeOf = (q, fallback = "all") => {
     const v = String(q.get("turn") || q.get("scope") || fallback);
@@ -2464,7 +2522,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     } catch (e) {
       return no(500, `Couldn't read the commit: ${e.message}`);
     }
-    const files = parseUnified(text).map((f) => ({ path: f.path, kind: f.kind === "rename" ? "edit" : f.kind, ...sizeOf(f.hunks), ...(f.binary ? { nodiff: true } : {}), ...capped(f.hunks) }));
+    const files = parseUnified(text).map((f) => keptSecret({ path: f.path, kind: f.kind === "rename" ? "edit" : f.kind, ...sizeOf(f.hunks), ...(f.binary ? { nodiff: true } : {}), ...capped(f.hunks) }));
     return { ...c, files };
   };
   reads["read.cloud_diff"] = async ({ post }) => {
@@ -2947,6 +3005,14 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   };
   commands["openclaw.pair"] = async (b) => {
     if (b.disconnect) return openclaw.configure(null);
+    // Admin, asked of the gateway: its owner approves it there.
+    if (b.admin) {
+      try {
+        return await openclaw.askAdmin();
+      } catch (e) {
+        return no(e.status || 502, `OpenClaw: ${e.message}`);
+      }
+    }
     if (b.setup_code != null) {
       let setup;
       try {
@@ -3281,13 +3347,14 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   // A launch's session, started in `cwd`: by its agent's driver, or by Claude Code in the background. `note`: what
   // the pages and widgets its prompt names showed (from the server); `dirs`: folders it can write besides its own
   // (its group's).
-  // `intro`: who it's from, before what they wrote, when that isn't its owner (an operator).
-  async function startSession({ agent, cwd, prompt, note = null, intro = null, files = [], lid, model, effort, dirs = [], repo }) {
+  // `intro`: who it's from, before what they wrote, when that isn't its owner (an operator, `user`, whose start a
+  // driver makes as theirs: OpenClaw's never with admin).
+  async function startSession({ agent, cwd, prompt, note = null, intro = null, user = null, files = [], lid, model, effort, dirs = [], repo }) {
     const said = [intro, prompt, note].filter(Boolean).join("\n\n");
     const drv = driverOfAgent(agent);
     // Its thread shows what you wrote (`shown`), not the note it was told with it.
-    if (drv?.sendsFiles) await drv.start({ agent, cwd, prompt: said, ...(note || intro ? { shown: prompt } : {}), files: filesOf(files), lid, model, effort, dirs, repo });
-    else if (drv) await drv.start({ agent, cwd, prompt: withFiles(said, files), ...(note || intro ? { shown: withFiles(prompt, files) } : {}), lid, model, effort, dirs });
+    if (drv?.sendsFiles) await drv.start({ agent, cwd, prompt: said, ...(note || intro ? { shown: prompt } : {}), files: filesOf(files), lid, model, effort, dirs, repo, user });
+    else if (drv) await drv.start({ agent, cwd, prompt: withFiles(said, files), ...(note || intro ? { shown: withFiles(prompt, files) } : {}), lid, model, effort, dirs, user });
     else commit({ t: "launch.started", lid, session: (await claude.start({ cwd, prompt: withFiles(said, files), lid, model, effort, dirs })).id });
   }
   // A Claude Code start the server sent again: what it said the first time, once the session Claude Code started
@@ -3399,7 +3466,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     const routine = b.routine || undefined;
     // The repo a thread that doesn't run here clones where it runs (Claude Agent, Devin): nothing's cloned here.
     const repo = driverOfAgent(agent)?.repos ? str(b.repo, 1000).trim() || undefined : undefined;
-    const start = (cwd) => startSession({ agent, cwd, prompt, note: b.note || null, intro: user ? operatorLine(user) : null, files, lid, model, effort, dirs, repo });
+    const start = (cwd) => startSession({ agent, cwd, prompt, note: b.note || null, intro: user ? operatorLine(user) : null, user, files, lid, model, effort, dirs, repo });
     // A repo this machine has no checkout of: clone it into the clone folder (or use a checkout of it already
     // there, or wait for the clone adding its workspace started), then start in it. A clone can take minutes, so
     // this answers right away and the post shows it cloning, then starting, or why it couldn't.
@@ -3474,7 +3541,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   // Writing on an ended post resumes its conversation in the background (`claude --resume … --bg`), with your
   // message as its next prompt. Its post comes back when it starts.
   const RESUME_WAIT_MS = 90e3;
-  const resuming = (s) => Object.values(state.launches).some((l) => l.resume && l.post === s.id && !l.error && s.launch !== l.id && Date.now() - Date.parse(l.at) < RESUME_WAIT_MS);
+  const resuming = (s) => Object.values(state.launches).some((l) => l.resume && l.post === s.id && !l.error && s.launch !== l.id && !failedSince(s, l) && Date.now() - Date.parse(l.at) < RESUME_WAIT_MS);
 
   // Claude Code finds a conversation by the folder it started in, whose path names the transcript's folder
   // (~/.claude/projects/-Users-me-dev-app), so resume there.
@@ -3904,6 +3971,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     cloud.begin();
     claudeRoutines.begin();
     groupFiles.start();
+    linkDesktop().catch((e) => log(`desktop: ${e.message}`));
     // The threads' terminals still open from before it started, then the runs that were going in them.
     terminals
       .adopt()

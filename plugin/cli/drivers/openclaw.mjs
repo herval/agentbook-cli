@@ -39,7 +39,7 @@ import { ANSWER_WORDS, HOME } from "../../lib/common.mjs";
 import { emojiOf, fetchPicture, fromDataUrl, pictureOf } from "../../shared/pictures.mjs";
 import { failedRoutines } from "../../shared/cron.mjs";
 import { conversationOf, outOfMemory } from "../../shared/store.mjs";
-import { connectGateway, makeIdentity } from "./openclaw-gateway.mjs";
+import { ADMIN, ADMIN_SCOPES, connectGateway, hasAdmin, makeIdentity } from "./openclaw-gateway.mjs";
 import { addSay, addTool, blank, deliverer, iso, liveOf, short, skillUses, summaryOf, toolDone, toolTitle } from "./steps.mjs";
 import { going as workerGoing, shown as shownWorkers, stateOf } from "../workers.mjs";
 import { limitsReader, openclawLimitsOf } from "../limits.mjs";
@@ -283,6 +283,15 @@ export function createOpenclaw(host) {
   let backoff = 0;
   let gw = null; // the direct connection to a gateway, when one is set
   let gwState = null;
+  // The owner's connection, with admin (openclaw-gateway.mjs's ADMIN_SCOPES): open while agentbook's device token has
+  // it, for what this machine's owner does (their own messages, the threads they start, Run now and Pause), never
+  // anyone else's. `gwId`: the device both sign in as, one object, so a token either is handed reaches the other.
+  let gwAdmin = null;
+  let adminState = null;
+  let gwId = null;
+  // Admin asked for (askAdmin), until the gateway approves it or it lapses: { requestId, at, status, error }, `status`
+  // once it's over without admin ("rejected", "expired", "failed", "lost": the gateway took it back).
+  let upgrade = null;
   // Whether that gateway has agentbook's plugin, which gives its agents agentbook's tools (see helloTools): {
   // installed, version, missing: tools agentbook has that this version of it doesn't }, or why agentbook couldn't
   // tell; null until it asked, on this connection.
@@ -313,11 +322,24 @@ export function createOpenclaw(host) {
     return { url: env || c.url || null, token: (env ? process.env.AGENTBOOK_OPENCLAW_TOKEN : c.token) || undefined, password: (env ? process.env.AGENTBOOK_OPENCLAW_PASSWORD : c.password) || undefined, bootstrapToken: (!env && c.bootstrapToken) || undefined, expiresAt: (!env && c.expiresAt) || null, fromEnv: !!env };
   }
 
+  function saveIdentity(id) {
+    // Once the gateway hands agentbook a device token, the setup code's token is spent.
+    const { bootstrapToken, expiresAt, ...c } = readConfig();
+    writeConfig({ ...(id.deviceToken ? c : { ...c, bootstrapToken, expiresAt }), device: id });
+    if (gwAdmin && !hasAdmin(id)) linkAdmin(); // a token without admin: the owner's connection goes
+  }
+
   // Connect to the gateway set, if there is one (and drop the one before).
   function linkGateway() {
     gw?.close();
     gw = null;
     gwState = null;
+    gwAdmin?.close();
+    gwAdmin = null;
+    adminState = null;
+    gwId = null;
+    upgrade = null;
+    commandLists.clear();
     tools = null;
     const s = settings();
     if (!s.url || !enabled) return;
@@ -326,17 +348,14 @@ export function createOpenclaw(host) {
       identity = makeIdentity();
       writeConfig({ ...readConfig(), device: identity });
     }
+    gwId = identity;
     gw = connectGateway({
       url: s.url,
       token: s.token,
       password: s.password,
       bootstrapToken: s.bootstrapToken,
       identity,
-      save: (id) => {
-        // Once the gateway hands agentbook a device token, the setup code's token is spent.
-        const { bootstrapToken, expiresAt, ...c } = readConfig();
-        writeConfig({ ...(id.deviceToken ? c : { ...c, bootstrapToken, expiresAt }), device: id });
-      },
+      save: saveIdentity,
       onState: (st) => {
         gwState = st;
         if (st.state !== "connected") tools = null;
@@ -347,6 +366,7 @@ export function createOpenclaw(host) {
           soon();
           host.refetch?.(); // the files that stopped coming while it was away
           helloTools();
+          if (!gwAdmin && hasAdmin(gwId)) linkAdmin(); // and the owner's again, after one that gave up
         }
         reached(st.state === "connected");
       },
@@ -360,6 +380,110 @@ export function createOpenclaw(host) {
       },
       log,
     });
+  }
+
+  // The owner's connection, while the device token has admin: no events (the everyday one hears them), and given up
+  // on, rather than tried again, when the gateway turns it down. Turned down for its scopes (the token was rotated
+  // with less on the gateway, or it wants admin approved again), agentbook stops counting on admin.
+  function linkAdmin() {
+    gwAdmin?.close();
+    gwAdmin = null;
+    adminState = null;
+    const s = settings();
+    // Only as its own device: a gateway's token or password signs in with what that gives.
+    if (!gw || !gwId || s.token || s.password || !hasAdmin(gwId)) return;
+    const conn = connectGateway({
+      url: s.url,
+      identity: gwId,
+      scopes: ADMIN_SCOPES,
+      subscribe: false,
+      owners: true,
+      save: saveIdentity,
+      log,
+      onState: (st) => {
+        if (gwAdmin !== conn) return;
+        adminState = st;
+        if (st.state === "failed") {
+          gwAdmin = null;
+          if (/SCOPE|PAIRING_REQUIRED|NO_TOKEN/i.test(st.code || "")) {
+            gwId.scopes = (gwId.scopes || []).filter((x) => x !== ADMIN);
+            saveIdentity(gwId);
+            upgrade = { requestId: null, at: Date.now(), status: "lost", error: st.error || null };
+            log(`openclaw: the gateway no longer takes agentbook as an admin (${st.error || st.code}), so it goes on without`);
+          }
+        }
+        commandLists.clear();
+        host.changed?.();
+      },
+    });
+    gwAdmin = conn;
+  }
+  const adminOn = () => !!gwAdmin && adminState?.state === "connected";
+  // What its owner does goes over the owner's connection while it's up; everyone else's, and all of it while it isn't
+  // (no admin, or reconnecting), over the everyday one, as it did before admin.
+  const ownerCall = (method, params, timeout) => (adminOn() ? gwAdmin.rpc(method, params, timeout) : call(method, params, timeout));
+
+  // Ask the gateway for admin, over the everyday connection (device.scopes.requestUpgrade: OpenClaw 2026.8 and
+  // later). Its owner approves it there (`openclaw devices approve <requestId>`, or in OpenClaw's app); the approval
+  // doesn't close agentbook's connection, and hands it the new device token on it (waitAdmin).
+  async function askAdmin() {
+    const s = settings();
+    if (!gw) throw Object.assign(new Error("agentbook isn't connected to a gateway of its own: connect it with a setup code first."), { status: 409 });
+    if (s.token || s.password) throw Object.assign(new Error("agentbook signs in to this gateway with its token, not as a device of its own: connect it with a setup code to give it admin."), { status: 409 });
+    if (hasAdmin(gwId) || (upgrade && !upgrade.status)) return connection(); // has it, or asked and waiting
+    let r;
+    try {
+      r = await call("device.scopes.requestUpgrade", { scopes: ADMIN_SCOPES }, 20000);
+    } catch (e) {
+      if (/unknown method/i.test(e.message)) throw Object.assign(new Error("This gateway's OpenClaw is older than 2026.8, which can't give a device admin while it's connected: update it first."), { status: 409 });
+      throw e;
+    }
+    if (!r?.requestId) throw new Error("OpenClaw didn't say which request to approve");
+    upgrade = { requestId: String(r.requestId), at: Date.now() };
+    log(`openclaw: asked the gateway for admin (approve it there: openclaw devices approve ${upgrade.requestId})`);
+    waitAdmin(gw, upgrade.requestId);
+    host.changed?.();
+    return connection();
+  }
+  // Until it's approved, turned down or lapses (the gateway keeps a request 5 minutes). The gateway keeps the request,
+  // not the call: one that drops with the connection is made again once it's back.
+  async function waitAdmin(conn, requestId) {
+    const until = Date.now() + 6 * 60e3;
+    const current = () => gw === conn && upgrade?.requestId === requestId && !upgrade.status;
+    while (current() && Date.now() < until) {
+      let r;
+      try {
+        r = await conn.rpc("device.scopes.waitUpgrade", { requestId }, Math.max(5000, until - Date.now()));
+      } catch (e) {
+        if (/closed|not connected|doesn't answer|dropped|didn't answer/i.test(e.message)) {
+          await new Promise((ok) => setTimeout(ok, 2000).unref?.());
+          continue;
+        }
+        if (current()) upgrade = { ...upgrade, status: "failed", error: e.message };
+        break;
+      }
+      if (!current()) return;
+      if (r?.status === "approved" && r.deviceToken) {
+        gwId.deviceToken = r.deviceToken;
+        gwId.scopes = Array.isArray(r.scopes) && r.scopes.length ? r.scopes : ADMIN_SCOPES;
+        upgrade = null;
+        saveIdentity(gwId);
+        commandLists.clear();
+        log("openclaw: the gateway gave agentbook admin");
+        linkAdmin();
+      } else upgrade = { ...upgrade, status: r?.status === "expired" ? "expired" : "rejected" };
+      break;
+    }
+    if (current()) upgrade = { ...upgrade, status: "expired" };
+    host.changed?.();
+  }
+  // Admin, for the Add agents page: "off", "asked" (with the request to approve), "on", "connecting", or how it ended
+  // without ("rejected", "expired", "failed", "lost").
+  function adminOf() {
+    if (!gw) return null;
+    if (hasAdmin(gwId)) return { state: adminOn() ? "on" : adminState?.state === "failed" ? "failed" : "connecting", error: adminState?.state === "failed" ? adminState.error || null : null };
+    if (upgrade) return { state: upgrade.status || "asked", requestId: upgrade.requestId, at: new Date(upgrade.at).toISOString(), error: upgrade.error || null };
+    return { state: "off" };
   }
 
   // Set the gateway to connect to (an address, and its token or password, or a setup code's bootstrap token),
@@ -397,7 +521,7 @@ export function createOpenclaw(host) {
     if (!gw) return { mode: "command", connected, error: lastError, state: connected ? "connected" : lastError ? "failed" : "idle" };
     const st = gwState || { state: "connecting" };
     const auth = s.token ? "token" : s.password ? "password" : s.bootstrapToken ? "setup-code" : "device";
-    return { mode: "gateway", url: s.url, fromEnv: s.fromEnv, auth, ...(auth === "setup-code" && s.expiresAt ? { expiresAt: s.expiresAt } : {}), state: st.state, error: st.error || null, requestId: st.requestId || null, deviceId: readConfig().device?.deviceId || null, server: st.server || null, tools: st.state === "connected" ? tools : null, plugin: PLUGIN_DIR.replace(os.homedir(), "~") };
+    return { mode: "gateway", url: s.url, fromEnv: s.fromEnv, auth, ...(auth === "setup-code" && s.expiresAt ? { expiresAt: s.expiresAt } : {}), state: st.state, error: st.error || null, requestId: st.requestId || null, deviceId: readConfig().device?.deviceId || null, server: st.server || null, tools: st.state === "connected" ? tools : null, plugin: PLUGIN_DIR.replace(os.homedir(), "~"), admin: adminOf() };
   }
 
   /* ---------- agentbook's tools, for its agents ---------- */
@@ -592,8 +716,8 @@ export function createOpenclaw(host) {
   // through chat.send as one typed in Telegram does. Left out (`off`, with why): what agentbook's operator scopes
   // can't run (only an admin's or the gateway owner's may), what means nothing here, and what agentbook does itself.
   const NOT_HERE = {
-    new: "starts over, which OpenClaw lets only an admin do from outside: start a new thread on its wall",
-    reset: "starts over, which OpenClaw lets only an admin do from outside: start a new thread on its wall",
+    new: "starts over, which OpenClaw lets only an admin do from outside: give agentbook admin on Settings, Agents, or start a new thread on its wall",
+    reset: "starts over, which OpenClaw lets only an admin do from outside: give agentbook admin on Settings, Agents, or start a new thread on its wall",
     stop: "is Stop, on the live line",
     btw: "answers on the side, which agentbook doesn't show yet",
     restart: "restarts the gateway, which only its owner may",
@@ -615,6 +739,9 @@ export function createOpenclaw(host) {
     openclaw: "sets OpenClaw up, in a terminal",
     tts: "speaks its replies, which agentbook doesn't play",
   };
+  // What admin lets its owner run after all (only they send slash commands: an operator's message can't start with /).
+  const WITH_ADMIN = new Set(["new", "reset"]);
+  const notHere = (name) => (WITH_ADMIN.has(name) && adminOn() ? null : NOT_HERE[name]);
   const commandLists = new Map(); // OpenClaw agent id -> { at, list, off }
   const COMMANDS_MS = 5 * 60e3;
   async function commands(s) {
@@ -628,12 +755,12 @@ export function createOpenclaw(host) {
     const hintOf = (args) => (Array.isArray(args) ? args : []).map((x) => (x.required ? `<${what(x)}>` : `[${what(x)}]`)).join(" ");
     const rows = (Array.isArray(r?.commands) ? r.commands : []).filter((c) => nameOf(c));
     const list = rows
-      .filter((c) => !NOT_HERE[nameOf(c)])
+      .filter((c) => !notHere(nameOf(c)))
       .map((c) => {
         const args = Array.isArray(c.args) ? c.args : [];
         return { name: nameOf(c), hint: hintOf(args), description: short(c.description, 200), from: c.source === "skill" ? "skill" : c.source === "plugin" ? "plugin" : "built-in", takes: args.some((x) => x.required) ? "req" : c.acceptsArgs || args.length ? "opt" : "" };
       });
-    const off = rows.filter((c) => NOT_HERE[nameOf(c)]).map((c) => ({ name: nameOf(c), why: NOT_HERE[nameOf(c)] }));
+    const off = rows.filter((c) => notHere(nameOf(c))).map((c) => ({ name: nameOf(c), why: notHere(nameOf(c)) }));
     commandLists.set(a, { at: Date.now(), list, off });
     return { list, off };
   }
@@ -1207,24 +1334,26 @@ export function createOpenclaw(host) {
   }
   const leftBehind = (key, left) => left.length && host.commit({ t: "message.add", post: key, from: "agent", via: "dash", text: `agentbook couldn't send ${left.join(", ")} to OpenClaw.` });
   // `command`: a slash command, which OpenClaw runs as it does one typed in Telegram, and never steers into a run.
-  async function send(key, text, files = [], { command = null } = {}) {
+  // `owner`: all of it is this machine's owner's own words (deliverer), which go over the owner's connection.
+  async function send(key, text, files = [], { command = null, owner = false } = {}) {
     const se = session(key);
     const { attachments, left } = attachmentsOf(files);
     leftBehind(key, left);
     if (!text.trim() && !attachments.length) return;
     se.sent.push(text.trim());
-    await call("chat.send", { sessionKey: key, message: text, idempotencyKey: idem(), ...(attachments.length ? { attachments } : {}), ...(se.active && !command ? { queueMode: "steer" } : {}) }, attachments.length ? 120e3 : 30000);
+    await (owner ? ownerCall : call)("chat.send", { sessionKey: key, message: text, idempotencyKey: idem(), ...(attachments.length ? { attachments } : {}), ...(se.active && !command ? { queueMode: "steer" } : {}) }, attachments.length ? 120e3 : 30000);
     if (!se.active) setActive(key, true);
     setTimeout(() => sync(), 1500).unref?.();
   }
   const deliver = deliverer({ host, log, name: "OpenClaw", answer, send, sendsFiles: true });
 
   // A new session with one of its agents, in the agent's own workspace, under a key agentbook picks, with the
-  // files you attached.
-  async function start({ agent, prompt, shown = prompt, files = [], lid }) {
+  // files you attached. `user`: someone this machine's owner lets operate it, whose start goes over the everyday
+  // connection; the owner's own, over theirs.
+  async function start({ agent, prompt, shown = prompt, files = [], lid, user = null }) {
     const id = String(agent).startsWith(AGENT) ? String(agent).slice(AGENT.length) : "main";
     const { attachments, left } = attachmentsOf(files);
-    const r = await call("sessions.create", { agentId: id, key: `agentbook-${lid}`, message: prompt, idempotencyKey: lid, ...(attachments.length ? { attachments } : {}) }, attachments.length ? 120e3 : 30000);
+    const r = await (user ? call : ownerCall)("sessions.create", { agentId: id, key: `agentbook-${lid}`, message: prompt, idempotencyKey: lid, ...(attachments.length ? { attachments } : {}) }, attachments.length ? 120e3 : 30000);
     if (r?.runStarted === false && r.runError) throw new Error(r.runError.message || String(r.runError));
     const key = r.key;
     const se = session(key);
@@ -1708,10 +1837,16 @@ export function createOpenclaw(host) {
     return { steps: d.steps.map(({ id, kind, at, tool, title, text, done, error }) => ({ id, kind, at, tool, title, text, done, error })), reply, model: d.model, gone: !messages.length };
   }
   // Run one now, or pause or resume it.
+  // OpenClaw does either only for an admin: its owner's, over the owner's connection.
   async function routineDo(id, job, what) {
     if (!ownJob(id, job)) return false;
-    if (what === "run") await call("cron.run", { id: job, mode: "force" });
-    else await call("cron.update", { id: job, patch: { enabled: what === "resume" } });
+    try {
+      if (what === "run") await ownerCall("cron.run", { id: job, mode: "force" });
+      else await ownerCall("cron.update", { id: job, patch: { enabled: what === "resume" } });
+    } catch (e) {
+      if (/missing scope: operator\.admin/i.test(e.message)) throw new Error("OpenClaw runs, pauses and resumes cron jobs only for an admin: give agentbook admin on Settings, Agents, OpenClaw.");
+      throw e;
+    }
     await loadRoutines();
     return true;
   }
@@ -1762,6 +1897,7 @@ export function createOpenclaw(host) {
     sendsFiles: true, // so the files you attach go to it, rather than their paths here
     configure,
     connection,
+    askAdmin,
     owns: (id) => String(id).startsWith(AGENT) && host.state.agents[id]?.kind === "openclaw",
     folders: false, // its agents work in their own workspaces
     begin,

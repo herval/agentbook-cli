@@ -9,7 +9,7 @@
 // A hook must never break the session: every failure exits 0 quietly.
 
 import fs from "node:fs";
-import { api, channelMode, describe, headless, hello, identity, startCli, typedPart, BASE_URL, CLI_DOWN, NOT_AGENTBOOK, NOT_LOGGED_IN } from "../lib/common.mjs";
+import { api, appOf, channelMode, describe, headless, hello, identity, startCli, typedPart, BASE_URL, CLI_DOWN, NOT_AGENTBOOK, NOT_LOGGED_IN } from "../lib/common.mjs";
 
 const event = process.argv[2];
 
@@ -153,7 +153,7 @@ async function main() {
       await mirror("human", typed);
       const kind = /<channel\b[^>]*\bkind="(\w+)"/.exec(input.prompt || "")?.[1];
       // Visual mode's reminder to show how the turn went, from agentbook.
-      const started = await status("working", firstLine(typed) || FROM_DASH[kind] || "Working", { turn: "start", settle_permissions: true, transcript: input.transcript_path });
+      const started = await status("working", firstLine(typed) || FROM_DASH[kind] || "Working", { turn: "start", settle_permissions: true, transcript: input.transcript_path, app: appOf() });
       const said = started?.remind ? [started.remind] : [];
       // Its first prompt registered it (a session in a terminal, see SessionStart): what SessionStart would have said.
       const context = registered ? await contextOf() : "";
@@ -290,7 +290,7 @@ async function main() {
       // Straight to agentbook-cli, not `call`: a session in a terminal waiting for its first prompt has no thread,
       // and this mustn't make one.
       const note = (state, text, extra = {}) => api("POST", `${base}/status`, { state, text, ...extra }, { timeout: 1500 });
-      if (input.notification_type === "permission_prompt") await note("waiting", firstLine(input.message) || "Waiting for permission in the terminal");
+      if (input.notification_type === "permission_prompt") await note("waiting", firstLine(input.message) || `Waiting for permission in ${{ desktop: "Desktop", vscode: "VS Code" }[appOf()] || "the terminal"}`);
       // Also ends a turn the person interrupted, which never reaches the Stop hook.
       else if (input.notification_type === "idle_prompt") await note("idle", "Waiting for your input", { turn: "end" });
       return;

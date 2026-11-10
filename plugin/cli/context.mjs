@@ -4,6 +4,8 @@
 //
 // Short on purpose: facts the agent can't find out by itself, and one line per tool. The rest is ab_show.
 
+import { READS_WELL } from "../shared/page-shape.mjs";
+
 const SHOWS = {
   "claude-code": "Shows there on its own: your steps, plan (TodoWrite), pull requests, edits and screenshots, from your transcript.",
   codex: "Shows there on its own: your commands, edits, plan, and your reply at the end of each turn, which is your comment on the thread. Your approval requests appear there as Allow/Deny.",
@@ -22,11 +24,12 @@ function reaches(kind, who, live) {
     : `${who.cap}'s answers and comments arrive at the end of your turns (a message they send now, at your next step), or via ab_inbox. When you're idle, a message from them starts your next turn.`;
 }
 
-// Visual mode, for every agent: show how a turn went on its
-// reply, so it reads at a glance. Also what Codex's own entry for agentbook's tools says
+// Visual mode, for every agent: how to write the reply that ends a turn (dense, the answer first), and the two
+// tools that go with it; the other shapes only when text can't do the job, never cards for their own sake. Also
+// what Codex's own entry for agentbook's tools says
 // (mcp.mjs), for the Codex threads agentbook didn't start, which get no context.
 export const visualMode = (name = "the person") =>
-  `Visual mode is on: ${name} reads your replies on agentbook at a glance, often on a phone. Right before the reply that ends a turn, call ab_verdict (one line, which your reply doesn't repeat; a long reply goes as sections, each a heading, its first line and the number that matters, drawn as rows that open; next: what you do next), ab_checks (what failed, and what you didn't check: never what's ${name}'s to do, that's ab_todo, with answers when it's a decision) and ab_suggest (what ${name} would likely say next): they show on your reply, with what the turn made (its changes, pull requests, questions, files) as chips under the line. Show rather than tell when it fits: ab_draft (an email, pull request, invite or message for them to send with a click), ab_cards (options, prices against a limit), ab_slots (times to pick), ab_path (what you tried, dead ends too), ab_highlight (the sentences that matter, in your reply or in what you read), ab_compare (screenshots before and after, options to pick, desktop and phone, or numbers that moved), ab_diagram (how something works, as boxes and arrows), ab_chart (numbers as lines or bars, where a table would make them read). Skip them only for a one-line answer.`;
+  `Visual mode is on: ${name} reads your reply on agentbook at a glance, often on a phone. Write it dense. The answer in the first sentence. Then only what changes what ${name} does next: the decision, the number, the risk, each a whole sentence with its reason. Nothing said twice. Under 120 words unless ${name} asked for detail. No telegraphic fragments, no label-colon lists, no restating what the thread already shows (your steps, changes and pull requests are on it). Right before it, call ab_verdict with the one line you'd keep if you kept nothing else (the reply doesn't repeat it) and ab_suggest with what ${name} would say next. Other shapes only when text can't do the job: ab_checks when a check failed; ab_todo with answers for a decision of ${name}'s that doesn't stop you; ab_compare for a screenshot pair or numbers that moved; ab_cards for alternatives to pick; ab_draft for something to send; ab_chart, ab_diagram, ab_slots, ab_path, ab_highlight when the answer is that shape. A shape never replaces the sentence that explains it.`;
 
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const quote = (s, n = 70) => {
@@ -63,7 +66,7 @@ function pageLines(p, who, now = Date.now()) {
   if (p.archived) lines.push(`It's archived: nobody can change it until ${keeper.name} brings it back.`);
   else if (p.canEdit)
     lines.push(
-      `You contribute to it. ab_page_read gives its widgets as data, and its latest versions (who changed what, when). ab_page_write with page: "${p.id}" adds, changes, removes and reorders widgets, and changes its title, emoji and description; each write that changes something is a version ${who.name} can see and restore. ${p.owner ? `It's @${p.owner}'s page, which ${who.name} contributes to: who sees it and who contributes are @${p.owner}'s to change.` : `Restoring a version, who sees it and who contributes are ${who.their} to change, on the page.`}`,
+      `You contribute to it. ab_page_read gives its widgets as data, and its latest versions (who changed what, when). ab_page_write with page: "${p.id}" adds, changes, removes and reorders widgets, and changes its title, emoji and description; each write that changes something is a version ${who.name} can see and restore. Keep it one page: put what you have in the widgets that are there before you add one, say each thing once, and replace a note's text rather than add to it${widgets.length > READS_WELL ? `. It has ${widgets.length} widgets, more than reads well (about 12): fold some together when you change it` : ""}. ${p.owner ? `It's @${p.owner}'s page, which ${who.name} contributes to: who sees it and who contributes are @${p.owner}'s to change.` : `Restoring a version, who sees it and who contributes are ${who.their} to change, on the page.`}`,
     );
   else lines.push(`You can read it with ab_page_read, but not change it: ${keeper.name} adds contributors on the page.`);
   return lines;

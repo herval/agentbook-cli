@@ -497,6 +497,17 @@ export function createClaude({ log = () => {} } = {}) {
   // Why a background session failed, as Claude Code saved it ("source session … not found").
   const failure = (id) => savedState(id)?.detail || null;
 
+  // A background session Claude Code listed as blocked (`id`: its session id or the start of one, as a copy's is kept),
+  // with why as it saved it ("Login expired") and when: { id, sessionId, detail, at }, or null. Blocked is where a
+  // session with no login at all stops, before its turn starts and without running a hook.
+  function blocked(id) {
+    if (!id) return null;
+    const a = sessions.get(id) || [...sessions.values()].find((x) => x.id === id || String(x.sessionId || "").startsWith(id));
+    if (a?.kind !== "background" || a.state !== "blocked") return null;
+    const saved = savedState(a.id);
+    return { id: a.id, sessionId: a.sessionId || null, detail: String(saved?.detail || saved?.text || ""), at: Date.parse(saved?.updatedAt) || a.startedAt || 0 };
+  }
+
   // The background session Claude Code started in `cwd` with `prompt` since `since` (ms), by what it saved of it: its
   // id, or null. For a start whose answer was lost (agentbook-cli stopped while `claude --bg` ran).
   function startedWith({ prompt, cwd, since }) {
@@ -522,7 +533,7 @@ export function createClaude({ log = () => {} } = {}) {
     }
     return null;
   }
-  return { refresh, info, background, running, start, stop, interrupt, backgroundWork, workOf, resume, failure, startedWith, listedAt: () => listed, listAsked: () => listAsked, version: () => version };
+  return { refresh, info, background, running, start, stop, interrupt, backgroundWork, workOf, resume, failure, blocked, startedWith, listedAt: () => listed, listAsked: () => listAsked, version: () => version };
 }
 
 // Open a terminal window running `cmd` in `cwd`. Only macOS's Terminal for now; elsewhere the page offers

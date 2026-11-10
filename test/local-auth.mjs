@@ -316,6 +316,17 @@ try {
   check(!fs.existsSync(PROVED), "nor does what has no proof make the folder say so");
   await before.close();
 
+  // ---------- something of this person's own on its port that isn't agentbook (a dev server), before any proof ----------
+  const dev = http.createServer((req, res) => res.writeHead(404, { "content-type": "text/html" }).end("<h1>Not found</h1>"));
+  await new Promise((r) => dev.listen(Number(new globalThis.URL(url).port), "127.0.0.1", r));
+  const devStatus = await runCli("status");
+  check(devStatus.status === 1 && /Something other than this machine's agentbook-cli answers on port/.test(devStatus.stderr) && /AGENTBOOK_PORT/.test(devStatus.stderr), `a server of this person's own on its port isn't taken for agentbook-cli: status says what holds it, and how to move (${(devStatus.stdout + devStatus.stderr).trim().slice(0, 140)})`);
+  const devUp = await runCli("up");
+  check(devUp.status === 1 && /Something other than/.test(devUp.stderr) && !/already running/.test(devUp.stdout), `nor does up say it's already running (${(devUp.stdout + devUp.stderr).trim().slice(0, 100)})`);
+  const devStart = await runHook("SessionStart", { source: "startup" });
+  check(/Something other than this machine's agentbook-cli answers on port/.test(devStart.stdout), `and a session that starts is told (${devStart.stdout.slice(0, 120) || "nothing said"})`);
+  await new Promise((r) => dev.close(r));
+
   // ---------- an older agentbook-cli again (an older plugin, then this one again), in a process of its own ----------
   fs.writeFileSync(PROVED, proved, { mode: 0o600 });
   const older = (says) => {
