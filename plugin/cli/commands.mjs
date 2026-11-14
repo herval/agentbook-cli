@@ -8,6 +8,7 @@
 //                               here, so its code or token never passes through the server
 //   fold <copy> <thread>        a copy of a thread's conversation Claude Code started on a resume, made that thread
 //                               again (the daemon's /local/fold): what it said, and the session it goes on in
+//   seat add|login|remove|list  a shared Linux machine's people, as root: a Linux user and an agentbook-cli each (seats.mjs)
 //   claude …, dev …             Claude Code with agentbook's channel (bin/agentbook-cli, which never comes here)
 //   help, version               what it can do, and which version this is: these two need no daemon and no login
 //   local                    agentbook on this machine alone (`agentbook up`): a server on 127.0.0.1:4310 with its
@@ -26,6 +27,7 @@ import { CLI_HOME, HOME } from "../shared/store.mjs";
 import { createGate } from "./gate.mjs";
 import { fingerprint, pinOf } from "./signatures.mjs";
 import { codexConfig, installedByClaude, removeCodexEntry } from "./uninstall.mjs";
+import { seatCommand } from "./seats.mjs";
 import { CORRUPT, DatabaseSync } from "../shared/db.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -80,7 +82,7 @@ const saved = () => {
     return null;
   }
 };
-function save(link) {
+export function save(link) {
   fs.mkdirSync(path.dirname(DEVICE()), { recursive: true });
   fs.writeFileSync(DEVICE(), JSON.stringify(link, null, 2) + "\n", { mode: 0o600 });
 }
@@ -625,13 +627,19 @@ Your agents:
   agentbook-cli remote [connect <kind> | off <kind>]   A cloud agent: claude-agent or devin, its key on stdin
   agentbook-cli fold <copy> <thread>     Make a copy Claude Code started part of its thread again
 
+A shared Linux machine, as root (each person their own Linux user and agentbook-cli):
+  agentbook-cli seat add <name> [--machine <name>]   A seat for someone: no sudo, a port of their own
+  agentbook-cli seat login <name> <server>           Log their agentbook-cli in as them, for them to approve
+  agentbook-cli seat remove <name>                   Stop it, and delete their Linux user and home
+  agentbook-cli seat [list]                          Who has a seat, and whether theirs is running
+
   agentbook-cli help, --version          This, and which version this is
 
 Its log is ${CLI_LOG}.`;
 
 // What can come in place of a command.
 export const FLAGS = { "--help": "help", "-h": "help", "--version": "version", "-v": "version" };
-export const COMMANDS = ["login", "connect", "logout", "status", "up", "down", "local", "allow", "deny", "gate", "approve", "log", "keys", "operators", "openclaw", "remote", "fold", "private", "uninstall", "help", "version"];
+export const COMMANDS = ["login", "connect", "logout", "status", "up", "down", "local", "allow", "deny", "gate", "approve", "log", "keys", "operators", "openclaw", "remote", "fold", "private", "seat", "uninstall", "help", "version"];
 // A command: what to print. `print`: for what it says before it's done (a code to approve).
 export async function runCommand([cmd, ...args], { print = (s) => console.log(s) } = {}) {
   switch (cmd) {
@@ -657,6 +665,8 @@ export async function runCommand([cmd, ...args], { print = (s) => console.log(s)
       return fold(args);
     case "private":
       return privateCommand(args);
+    case "seat":
+      return seatCommand(args);
     case "uninstall":
       return uninstall(args);
     case "help":

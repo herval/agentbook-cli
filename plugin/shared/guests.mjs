@@ -5,7 +5,9 @@
 //
 // The store applies the ops with applyGuest():
 //   thread.guest { gid, host, agent, launch?, post?, by }: a guest joins thread `host` (again, if it had left).
-//     `launch`: the start of its session, while it isn't there yet; `post` once it is.
+//     `launch`: the start of its session, while it isn't there yet; `post` once it is. A thread that was there
+//     already has no launch, and `after`: the last message it had when it joined ("none" for none), since what it
+//     said before isn't part of the conversation.
 //   thread.guest { gid, post }: the session its launch became.
 //   thread.guest { gid, remove: true, by }: it leaves; what it said stays in the thread.
 //   thread.seen { post, upto }: thread `post` has heard the others' messages up to `upto` (an ISO time).
@@ -25,12 +27,12 @@ export function applyGuest(state, op, now) {
       }
       if (!g) {
         if (!op.host) break;
-        guests[op.gid] = { id: op.gid, host: op.host, agent: op.agent || null, launch: op.launch || null, post: op.post || null, by: op.by || null, at: now, removed: null };
+        guests[op.gid] = { id: op.gid, host: op.host, agent: op.agent || null, launch: op.launch || null, post: op.post || null, by: op.by || null, at: now, removed: null, ...(op.after ? { after: op.after } : {}) };
         break;
       }
       if (op.post) g.post = op.post;
       // Brought in again: it hears the thread from now on, as when it first joined.
-      if (op.host && g.removed) Object.assign(g, { removed: null, removed_by: null, back: now });
+      if (op.host && g.removed) Object.assign(g, { removed: null, removed_by: null, back: now, ...(op.after ? { after: op.after } : {}) });
       break;
     }
     case "thread.seen": {

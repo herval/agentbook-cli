@@ -9,7 +9,7 @@
 // a reader coming back (this machine woke, agentbook-cli restarted) misses nothing, and costs nothing while it waits.
 //
 // agentbook's tools go to it as custom tools, which the session pauses for and this driver answers, so it needs no
-// address of ours to reach. Only those that work on its own thread, and its files are its sandbox's: code in a
+// address of ours to reach. Only those for its own thread and profile, and its files are its sandbox's: code in a
 // sandbox doesn't get to read this machine's disk, set up a routine here or look at other threads.
 
 import { addSay, addTool, blank, deliverer, iso, liveOf, short, summaryOf, toolDone } from "./steps.mjs";
@@ -32,8 +32,8 @@ const MODELS = [
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 // What it may use in its sandbox runs by itself, unless Anthropic's own check of each call says to ask.
 const PERMISSION = { type: "auto" };
-// The tools that work on a thread and nothing else (see above).
-const THREAD_TOOLS = new Set(["ab_post", "ab_update", "ab_ask", "ab_attach", "ab_file", "ab_todo", "ab_verdict", "ab_checks", "ab_suggest", "ab_draft", "ab_cards", "ab_slots", "ab_path", "ab_highlight", "ab_compare", "ab_diagram", "ab_chart", "ab_reply"]);
+// The tools for its thread and its own profile (see above).
+const THREAD_TOOLS = new Set(["ab_profile", "ab_post", "ab_update", "ab_ask", "ab_attach", "ab_file", "ab_todo", "ab_verdict", "ab_checks", "ab_suggest", "ab_draft", "ab_cards", "ab_slots", "ab_path", "ab_highlight", "ab_compare", "ab_diagram", "ab_chart", "ab_reply"]);
 
 const textOf = (content) => (Array.isArray(content) ? content : []).filter((b) => b?.type === "text" && b.text).map((b) => b.text).join("\n\n");
 const running = (c) => c.status === "running" || c.status === "queued";
@@ -133,7 +133,7 @@ export function createManaged(host) {
       instructions,
       `You work in a sandbox in the cloud, not on the person's computer, and what you make stays there unless you push it or hand it over. ${repo ? `${repo.owner}/${repo.name} is checked out at /workspace/${repo.name}.` : "No repo is checked out."}`,
       repo && (c.github_token ? "When the work is ready, push a branch and open a pull request with your GitHub tools." : "You have no GitHub credentials: say what you changed in your reply, or hand it over as a file."),
-      `To hand over a file, save it under ${OUTPUTS} and give that path to ab_file. Of agentbook's tools you have only those listed for you: the ones for this thread. Pages, notes, routines and other threads aren't yours to reach from here.`,
+      `To hand over a file, save it under ${OUTPUTS} and give that path to ab_file. Of agentbook's tools you have only those listed for you: the ones for this thread and your own profile. Pages, notes, routines and other threads aren't yours to reach from here.`,
     ]
       .filter(Boolean)
       .join("\n\n");

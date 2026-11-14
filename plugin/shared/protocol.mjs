@@ -138,7 +138,7 @@ export const OPS = {
   "post.gone": { t: "session.gone", fields: { post: ID, "reason?": S(200), "ended?": S(40) } },
   "post.sleep": { t: "session.sleep", fields: { post: ID, "reason?": S(200) } },
   "post.post": { t: "session.post", fields: { post: ID, "title?": S(200), "text?": { type: "string", max: 8000, nullable: true } } },
-  "post.update": { t: "session.update", fields: { post: ID, text: S(600), "link?": { type: "string", max: 2000, nullable: true }, "changes?": OBJ(16 * 1024), "pr?": OBJ(4096) } },
+  "post.update": { t: "session.update", fields: { post: ID, text: S(600), "link?": { type: "string", max: 2000, nullable: true }, "changes?": OBJ(16 * 1024), "pr?": OBJ(4096), "notify?": B } },
   "post.pr": { t: "session.pr", fields: { post: ID, url: S(500), "number?": N, "repo?": S(300), "how?": S(20), "at?": S(40), "off?": B, "gh?": { type: "object", bytes: 32 * 1024, nullable: true } } },
   "post.attach": { t: "session.attach", fields: { post: ID, key: S(60), "type?": S(20), "title?": S(200), "data?": OBJ(512 * 1024), "remove?": B } },
   // How its turn went, to show on the reply that ends it: its verdict, what it didn't check, the
@@ -158,7 +158,7 @@ export const OPS = {
   "post.snapshot": { t: "session.snapshot", fields: { post: ID, "ai_title?": { type: "string", max: 400, nullable: true }, "model?": { type: "string", max: 120, nullable: true }, "plan?": ANY(128 * 1024), "stats?": ANY(16 * 1024), "context?": ANY(16 * 1024), "skill_uses?": ANY(64 * 1024), "started?": S(40), "prs?": OBJ(64 * 1024), "loops?": ARR(OBJ(64 * 1024), 100, 512 * 1024) } },
   "agent.hello": { t: "agent.hello", fields: { agent: ID, "agent_name?": S(80), "kind?": S(40), "host?": { type: "string", max: 200, nullable: true }, "version?": S(40) }, makes: (op) => [["agent", op.agent]] },
   "agent.avatar": { t: "agent.avatar", fields: { agent: ID, avatar: { type: "object", bytes: 4096, nullable: true }, "default?": B } },
-  "launch.add": { t: "launch.add", fields: { lid: ID, agent: ID, "root?": { type: "string", max: 2000, nullable: true }, "branch?": { type: "string", max: 300, nullable: true }, "prompt?": S(12000), "files?": ARR(ID, 50), "post?": { type: "string", max: 300, nullable: true }, "resume?": B, "named?": B, "teleport?": { type: "string", max: 200, nullable: true }, "visibility?": { type: "string", max: 20, nullable: true }, "cloning?": { type: "string", max: 300, nullable: true }, "step?": { type: "string", max: 200, nullable: true }, "task?": { type: "string", max: 600, nullable: true }, "page?": { type: "string", max: 120, nullable: true }, "cwd?": { type: "string", max: 2000, nullable: true }, "model?": { type: "string", max: 80, nullable: true }, "effort?": { type: "string", max: 20, nullable: true }, "group?": { type: "string", max: 120, nullable: true }, "routine?": ROUTINE_REF, "noted?": B, "user?": { type: "string", max: 80, nullable: true } }, makes: (op) => [["launch", op.lid]] },
+  "launch.add": { t: "launch.add", fields: { lid: ID, agent: ID, "root?": { type: "string", max: 2000, nullable: true }, "branch?": { type: "string", max: 300, nullable: true }, "prompt?": S(12000), "files?": ARR(ID, 50), "post?": { type: "string", max: 300, nullable: true }, "resume?": B, "named?": B, "teleport?": { type: "string", max: 200, nullable: true }, "visibility?": { type: "string", max: 20, nullable: true }, "cloning?": { type: "string", max: 300, nullable: true }, "step?": { type: "string", max: 200, nullable: true }, "task?": { type: "string", max: 600, nullable: true }, "page?": { type: "string", max: 120, nullable: true }, "cwd?": { type: "string", max: 2000, nullable: true }, "model?": { type: "string", max: 80, nullable: true }, "effort?": { type: "string", max: 20, nullable: true }, "group?": { type: "string", max: 120, nullable: true }, "routine?": ROUTINE_REF, "noted?": B, "user?": { type: "string", max: 80, nullable: true }, "side_of?": ID }, makes: (op) => [["launch", op.lid]] },
   "launch.cloned": { t: "launch.cloned", fields: { lid: ID } },
   // What a start is doing before its session is up ("Making its worktree"), and how far it got: `done` of `total`
   // files. A null step: it's starting its session.
@@ -168,9 +168,9 @@ export const OPS = {
   "launch.failed": { t: "launch.fail", fields: { lid: ID, error: S(2000) } },
   "question.ask": { t: "question.ask", fields: { post: ID, qid: ID, "kind?": S(20), title: S(600), "detail?": S(2000), "preview?": S(8000), "options?": ARR(OBJ(1024), 8), "default?": { type: "string", max: 400, nullable: true }, "until?": { type: "string", max: 40, nullable: true }, "key?": { type: "string", max: 120, nullable: true }, "request_id?": { type: "string", max: 40, nullable: true }, "tool_name?": { type: "string", max: 120, nullable: true }, "hook?": B, "blocks?": B, "other?": B }, makes: (op) => [["question", op.qid]] },
   "question.answer": { t: "question.answer", fields: { qid: ID, value: { type: "any", bytes: 8192 }, "by?": S(20), "user?": { type: "string", max: 80, nullable: true }, "file_id?": { type: "string", max: 300, nullable: true }, "file?": { type: "object", bytes: 4096, nullable: true } } },
-  "file.add": { t: "file.add", fields: { fid: ID, "post?": { type: "string", max: 300, nullable: true }, from: S(20), name: S(300), "title?": S(300), "size?": N, "stored?": { type: "string", max: 400, nullable: true }, "blob?": { type: "string", max: 80, nullable: true }, "type?": { type: "string", max: 120, nullable: true }, "draft?": B, "embedded?": B, "pending?": B, "silent?": B, "remote?": ANY(4096) }, makes: (op) => [["file", op.fid]] },
+  "file.add": { t: "file.add", fields: { fid: ID, "post?": { type: "string", max: 300, nullable: true }, from: S(20), name: S(300), "title?": S(300), "size?": N, "stored?": { type: "string", max: 400, nullable: true }, "blob?": { type: "string", max: 80, nullable: true }, "type?": { type: "string", max: 120, nullable: true }, "draft?": B, "embedded?": B, "pending?": B, "silent?": B, "remote?": ANY(4096), "artifact?": { type: "string", max: 300, nullable: true } }, makes: (op) => [["file", op.fid]] },
   "file.size": { t: "file.size", fields: { fid: ID, size: N } },
-  "message.add": { t: "message.add", fields: { post: ID, mid: ID, from: S(20), "via?": S(20), "text?": S(16000), "file_id?": { type: "string", max: 300, nullable: true }, "files?": ARR(ID, 50), "when?": S(40), "ext?": { type: "string", max: 300, nullable: true }, "resume?": { type: "string", max: 300, nullable: true }, "routine?": ROUTINE_REF, "queue?": B, "command?": S(100), "user?": { type: "string", max: 80, nullable: true } }, makes: (op) => [["message", op.mid]] },
+  "message.add": { t: "message.add", fields: { post: ID, mid: ID, from: S(20), "via?": S(20), "text?": S(16000), "file_id?": { type: "string", max: 300, nullable: true }, "files?": ARR(ID, 50), "when?": S(40), "ext?": { type: "string", max: 300, nullable: true }, "resume?": { type: "string", max: 300, nullable: true }, "routine?": ROUTINE_REF, "queue?": B, "command?": S(100), "user?": { type: "string", max: 80, nullable: true }, "launch?": ID }, makes: (op) => [["message", op.mid]] },
   "message.files": { t: "message.files", fields: { post: ID, ext: S(300), files: ARR(ID, 50) } },
   "message.text": { t: "message.text", fields: { post: ID, ext: S(300), text: S(16000) } },
   "message.drop": { t: "message.drop", fields: { post: ID, mids: ARR(ID, 2000, 128 * 1024) } },
@@ -275,7 +275,7 @@ export const STATE = {
     "loops?": list({ type: "object" }),
     "copies?": list({ type: "string", max: 1000 }),
   },
-  agents: { id: KEY, name: KEY, "glyph?": T, "kind?": T, "host?": T, "version?": T, "created?": T, "hidden?": TB, "avatar?": TO, "avatar_default?": TO },
+  agents: { id: KEY, name: KEY, "glyph?": T, "kind?": T, "host?": T, "version?": T, "created?": T, "hidden?": TB, "bio?": S(500), "avatar?": TO, "avatar_default?": TO },
   launches: {
     id: KEY,
     ...Object.fromEntries(["agent", "root", "cwd", "branch", "prompt", "at", "post", "teleport", "visibility", "step", "task", "page", "group", "model", "effort", "error", "session", "archived"].map((k) => [`${k}?`, T])),
@@ -349,8 +349,11 @@ export const INFO = {
   folders: OBJ(2 * 1024 * 1024),
   agent: OBJ(256 * 1024),
   post: OBJ(256 * 1024),
+  // A machine in a cloud sandbox: whether stopping it now would cut something off (`busy`), and when its
+  // agentbook-cli started (`started`). Its server moves the sandbox's auto-stop by it (cloud.mjs, "Sleeping").
+  pace: OBJ(1024),
 };
-export const infoKind = (key) => (key === "machine" || key === "folders" ? key : key.startsWith("agent:") ? "agent" : key.startsWith("post:") ? "post" : null);
+export const infoKind = (key) => (key === "machine" || key === "folders" || key === "pace" ? key : key.startsWith("agent:") ? "agent" : key.startsWith("post:") ? "post" : null);
 
 /* ---------- commands: what someone did on the page ---------- */
 
@@ -367,6 +370,8 @@ export const COMMANDS = {
   "post.deliver": { steer: true, expires: 7 * 86400e3, fields: { post: ID, "text?": S(12000), "files?": ARR(FILE_REF, 20), "bare?": B, "note?": S(16000), "routine?": ROUTINE_REF, "queue?": B, "command?": S(100), "ok?": OK } },
   "post.answer": { steer: true, expires: 60e3, fields: { post: ID, qid: ID, "value?": { type: "string", max: 2000, nullable: true }, "skip?": B, "archived?": B, "user?": { type: "string", max: 80, nullable: true }, "file?": FILE_REF } },
   "post.notify": { steer: true, expires: 7 * 86400e3, fields: { post: ID, event: OBJ(16 * 1024), "ok?": OK } },
+  // A side thread: what you wrote, to a new session that goes on from the thread's conversation so far, in its folder.
+  "post.side": { steer: true, expires: 3600e3, fields: { post: ID, text: S(12000), "files?": ARR(FILE_REF, 20), "note?": S(16000) } },
   "post.stop": { steer: true, expires: 60e3, fields: { post: ID, "force?": B } },
   "post.model": { steer: true, expires: 3600e3, fields: { post: ID, model: { type: "string", max: 80, nullable: true } } },
   "post.sleep": { steer: true, expires: 3600e3, fields: { post: ID, reason: S(200) } },
@@ -392,6 +397,19 @@ export const COMMANDS = {
   "wip.clean": { steer: true, expires: 600e3, fields: { root: S(2000), branch: S(300) } },
   "wip.discard": { steer: true, expires: 600e3, fields: { root: S(2000), branch: S(300), "sha?": S(64) } },
   "workspace.clone": { steer: true, expires: 3600e3, fields: { url: S(1000) } },
+  // A cloud machine runs its image's script on its own disk (an Update to a newer version): what agentbook-server
+  // wrote for that version, which its owner signed. Not kept waiting long: an update is for a machine that's on.
+  "cloud.setup": { steer: true, expires: 600e3, fields: { script: S(70000), v: N } },
+  // A shared machine's owner adds someone to it, or takes them off: { envelope: { v: 1, kind: "members.change",
+  // machine, user, at, remove? }, sig }. The machine's root helper checks an add is signed by its owner's passkey
+  // (plugin/cli/seat-helper.mjs); taking someone off isn't signed.
+  "members.change": { steer: true, expires: 24 * 3600e3, fields: { change: OBJ(64 * 1024) } },
+  // A login agentbook-server made for a member's seat there, for the helper to put in their home. It holds what picks
+  // their machine's token up, so it's kept in memory only, and not for long.
+  // A person's own secret on their seat of a shared machine: set, or with no value, taken away. Its value is kept
+  // in their home there and nowhere else, so this is held in memory only on its way.
+  "seat.secret": { steer: true, secret: true, expires: 600e3, fields: { name: S(128), "value?": S(20000) } },
+  "members.enroll": { steer: true, secret: true, expires: 600e3, fields: { user: S(40), enroll: OBJ(4096) } },
   // Claude Code told to trust a folder, as its trust prompt there would; with `lid`, a start that failed for want
   // of that trust, started again there.
   "folder.trust": { steer: true, expires: 3600e3, fields: { path: S(2000), "lid?": ID } },

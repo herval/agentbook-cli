@@ -11,7 +11,31 @@ import { BIRDS } from "../shared/ids.mjs";
 import { AUTH_HEADER, PROOF_HEADER, proofOk, signRequest } from "../shared/local-auth.mjs";
 
 export const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const PORT = Number(process.env.AGENTBOOK_PORT || 4320);
+// On a shared machine (cli/seats.mjs), each person runs their own agentbook-cli, as their own Linux user, on a port of
+// its own. root keeps the ports in /etc/agentbook/seats.json, which everyone can read. A session's hooks and tools look
+// up their person's port there by their uid. The file counts only if root alone can change it, and the folder it's in.
+export const SEATS_FILE = process.env.AGENTBOOK_SEATS_FILE || "/etc/agentbook/seats.json";
+export function seatsIn(file = SEATS_FILE, { stat = fs.statSync } = {}) {
+  try {
+    if (!process.env.AGENTBOOK_SEATS_FILE)
+      for (const p of [file, path.dirname(file)]) {
+        const st = stat(p);
+        if (st.uid !== 0 || st.mode & 0o022) return null;
+      }
+    const all = JSON.parse(fs.readFileSync(file, "utf8"));
+    return all && typeof all.seats === "object" && all.seats ? { machine: all.machine || null, seats: all.seats } : null;
+  } catch {
+    return null;
+  }
+}
+// This user's seat: { name, uid, port }, or null on a machine that isn't shared, or for someone without one.
+export function seatOf(uid = process.getuid?.(), all = seatsIn()) {
+  if (!all || !Number.isInteger(uid)) return null;
+  for (const [name, s] of Object.entries(all.seats)) if (s?.uid === uid && Number.isInteger(s.port) && s.port > 0) return { name, uid, port: s.port };
+  return null;
+}
+export const SEAT = process.platform === "linux" || process.env.AGENTBOOK_SEATS_FILE ? seatOf() : null;
+export const PORT = Number(process.env.AGENTBOOK_PORT || SEAT?.port || 4320);
 export const BASE_URL = (process.env.AGENTBOOK_URL || `http://127.0.0.1:${PORT}`).replace(/\/$/, "");
 export const HOME = process.env.AGENTBOOK_HOME || path.join(os.homedir(), ".agentbook");
 // The logs of what this machine starts: agentbook-cli's in its folder, agentbook-server's (agentbook up) in its.
@@ -425,6 +449,16 @@ export async function startCli() {
   if (now.state === "busy") return { up: true };
   if (now.state === "up" && !(IS_LOCAL && outdated(now.health, root) && (await stopCli(now.health, 2500, now.pid)))) return { up: true };
   if (!IS_LOCAL) return { up: false };
+  // A seat's agentbook-cli is a service (cli/seats.mjs), so it's never started from here, which would make a second one.
+  // One that's down, or that was just stopped for being older, comes back by itself in a few seconds (RestartSec=3),
+  // within SessionStart's 10.
+  if (SEAT && !process.env.AGENTBOOK_PORT) {
+    for (let i = 0; i < 25; i++) {
+      if ((await cliState()) !== "down") return { up: true };
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return { up: false, why: `${SEAT.name}'s agentbook-cli isn't running. On this shared machine it runs as a service, and whoever runs the machine sees why with: systemctl status agentbook-cli@${SEAT.name}` };
+  }
   if (nodeTooOld()) return { up: false, why: NODE_TOO_OLD() };
   // Whether it stopped, and with an error. One that lost the race to another stops without one, and that other comes up.
   let ended = false;

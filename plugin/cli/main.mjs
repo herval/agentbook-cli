@@ -13,11 +13,12 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PORT, SERVER_LOG, VERSION, openLog } from "../lib/common.mjs";
+import { PORT, SERVER_LOG, VERSION, openLog, seatsIn } from "../lib/common.mjs";
 import { machineName } from "../shared/ids.mjs";
 import { CLI_HOME, FILES_DIR, HOME } from "../shared/store.mjs";
 import { keepPrivate, moveIntoCli } from "./cli-folder.mjs";
-import { COMMANDS, FLAGS, plainOk, runCommand } from "./commands.mjs";
+import { COMMANDS, FLAGS, plainOk, runCommand, save as saveLink } from "./commands.mjs";
+import { ENROLL_FILE, enroll } from "./enroll.mjs";
 import { stayUp } from "./crash.mjs";
 import { createCli } from "./daemon.mjs";
 import { watchInstall } from "./uninstall.mjs";
@@ -95,7 +96,12 @@ function keepLocalServer(l) {
 }
 
 export async function runCli({ port = PORT, host = "127.0.0.1", linkPollMs = Number(process.env.AGENTBOOK_LINK_POLL_MS || 3000) } = {}) {
+  // On a shared machine, everyone's agentbook-cli runs as them (seats.mjs). One running as root would run agents as root.
+  if (process.platform === "linux" && process.getuid() === 0 && seatsIn()) throw new Error("This is a shared machine, where each person's agentbook-cli runs as them, never as root: agentbook-cli seat lists them.");
   const faults = stayUp({ log });
+  // A machine agentbook-server made logs itself in from the file it was started with (enroll.mjs), before anything
+  // else: it then starts as any machine that's logged in does. Before the port, so nothing's served meanwhile.
+  await enroll({ home: HOME, linked: !!serverLink(), plainOk, save: saveLink, log }).catch((e) => log(`enroll: ${e.message}`));
   let link = null;
   let cli = null;
   function connect(l) {
@@ -159,8 +165,20 @@ export async function runCli({ port = PORT, host = "127.0.0.1", linkPollMs = Num
   if (link) connect(link);
   if (link || process.env.AGENTBOOK_START_UNLINKED) cli.start(); // that variable: the tests', which log in as they go
   if (!link) {
+    let enrolling = false;
     const look = setInterval(() => {
       const l = serverLink();
+      // A machine agentbook-server made, whose login file was written after this started: it logs in with it now, and
+      // starts again as that machine (what keeps it running, systemd there, brings it back).
+      if (!l && !enrolling && fs.existsSync(ENROLL_FILE())) {
+        enrolling = true;
+        enroll({ home: HOME, plainOk, save: saveLink, log })
+          .then((saved) => {
+            if (saved && process.env.AGENTBOOK_SUPERVISED === "1") process.kill(process.pid, "SIGTERM");
+          })
+          .catch((e) => log(`enroll: ${e.message}`))
+          .finally(() => (enrolling = false));
+      }
       if (!l) return;
       clearInterval(look);
       if (!connect(l)) return;

@@ -88,8 +88,14 @@ export const WIDGETS = {
     fields: {
       columns: { t: "list", of: { t: "text", max: 80 }, need: true, shape: "[..]" },
       rows: { t: "list", of: { t: "list", of: { t: "cell" } }, max: 500, need: true, shape: "[[..], ..] or [{col: val}, ..]" },
+      sort: { t: "text", max: 81, say: "the column it shows sorted by, as its name: 'Cost' smallest first, '-Cost' largest first. Rows can then come in any order; the person re-sorts by any header" },
     },
     about: `A cell can be ${statusShape} or { meter: 0-100 }.`,
+    // The column it's sorted by is one of its columns.
+    post: (d, out, at) => {
+      if (d.sort != null && d.sort !== "" && !(d.columns || []).includes(String(d.sort).replace(/^-/, ""))) out.errors.push(`${at}.sort: no column "${String(d.sort).replace(/^-/, "")}" (${(d.columns || []).join(", ")}). '-' before the name sorts largest first.`);
+      return d;
+    },
     // Rows as arrays, in the order of its columns: rows given as objects are read by column name, and without
     // columns, the first such row's names are its columns.
     pre: (d) => {

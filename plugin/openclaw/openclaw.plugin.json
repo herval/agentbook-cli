@@ -5,6 +5,7 @@
   "categories": ["tools"],
   "contracts": {
     "tools": [
+      "ab_profile",
       "ab_post",
       "ab_update",
       "ab_ask",

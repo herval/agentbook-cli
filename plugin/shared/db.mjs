@@ -99,6 +99,16 @@ const MIGRATIONS = [
   // 18: who follows which person, at what level
   `create table person_follows (id text primary key, person text, follower text, data text not null);
    create index person_follows_person on person_follows (person);`,
+  // 19: the page updates each person archived off their feed
+  `create table feed_archived (id text primary key, data text not null);`,
+  // 20: the cloud sandbox each machine runs in, as its owner said or as agentbook made it
+  `create table machine_cloud (id text primary key, data text not null);`,
+  // 21: images for cloud machines, as their owners define them, and each build of one
+  `create table images (id text primary key, owner text, data text not null);
+   create table image_builds (id text primary key, image text, data text not null);
+   create index image_builds_image on image_builds (image);`,
+  // 22: shared machines: who's on each, by the machine that's shared
+  `create table boxes (id text primary key, owner text, data text not null);`,
 ];
 
 export function openDb(file) {
@@ -205,6 +215,14 @@ const PARTS = {
   page_posts: { keyed: true, columns: (m) => ({ page: m.page ?? null }) },
   agent_follows: { keyed: true, columns: (f) => ({ agent: f.agent ?? null, follower: f.user ?? null }) },
   person_follows: { keyed: true, columns: (f) => ({ person: f.person ?? null, follower: f.user ?? null }) },
+  // By person: the pages whose latest update they archived, and when each had last moved up the feed.
+  feed_archived: { keyed: true },
+  // By machine: the cloud sandbox it runs in, and the connector of its owner's that wakes it.
+  machine_cloud: { keyed: true },
+  images: { keyed: true, columns: (i) => ({ owner: i.owner ?? null }) },
+  image_builds: { keyed: true, columns: (b) => ({ image: b.image ?? null }) },
+  // By the machine that's shared (its owner's): the people on it.
+  boxes: { keyed: true, columns: (b) => ({ owner: b.owner ?? null }) },
 };
 
 // Read and write the state. `checkpoint` writes only what changed since the last one.
@@ -222,7 +240,7 @@ export function createTables(db) {
   const logOp = db.prepare("insert or ignore into events (seq, at, op) values (?, ?, ?)");
 
   function load() {
-    const state = { agents: {}, sessions: {}, procs: {}, launches: {}, questions: [], todos: [], files: [], messages: [], outbox: [], workspaces: {}, tasks: {}, pages: {}, page_versions: [], routines: {}, routine_code: [], routine_runs: [], groups: {}, group_notes: [], group_files: [], group_events: [], group_posts: {}, notes: {}, note_versions: [] , thread_guests: {}, thread_seen: {}, talks: {}, wip_sets: {}, page_posts: {}, agent_follows: {}, person_follows: {} };
+    const state = { agents: {}, sessions: {}, procs: {}, launches: {}, questions: [], todos: [], files: [], messages: [], outbox: [], workspaces: {}, tasks: {}, pages: {}, page_versions: [], routines: {}, routine_code: [], routine_runs: [], groups: {}, group_notes: [], group_files: [], group_events: [], group_posts: {}, notes: {}, note_versions: [] , thread_guests: {}, thread_seen: {}, talks: {}, wip_sets: {}, page_posts: {}, agent_follows: {}, person_follows: {}, feed_archived: {}, machine_cloud: {}, images: {}, image_builds: {}, boxes: {} };
     for (const [part, spec] of Object.entries(PARTS)) {
       const rows = db.prepare(spec.plain ? `select proc, post from ${part}` : `select id, ${spec.keyed && !spec.ordered ? "null as ord" : "ord"}, data from ${part} ${spec.keyed && !spec.ordered ? "" : `order by ord ${spec.newestFirst ? "desc" : "asc"}`}`).all();
       for (const r of rows) {

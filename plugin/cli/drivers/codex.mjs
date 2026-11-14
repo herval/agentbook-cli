@@ -5,6 +5,8 @@
 //   follows the ones loaded in the daemon: their status, every item (commands, edits, messages), the plan.
 // - Writing on a post sends a turn (or steers the running one); writing on a post whose thread isn't
 //   loaded resumes it first. Posting on the Codex wall starts a thread.
+// - Sending on the side forks the thread (`thread/fork`) into a side thread of its own, which
+//   goes on with what you sent while the thread works on.
 // - Codex's approval requests (run a command, edit files, more access) become Allow/Deny prompts on the
 //   post, and its questions become polls. Stop interrupts the running turn.
 // - A model picked for a thread goes with its next turn (`turn/start` takes one, for that turn and the
@@ -29,6 +31,7 @@ import { liveStep, said, SEEN_TOOL, seenTitle } from "../transcript.mjs";
 import { createCodexAutomations } from "./codex-automations.mjs";
 import { codexLimitsOf, limitsReader } from "../limits.mjs";
 import { connectWs } from "./ws.mjs";
+import { codexWhy } from "../../shared/whynot.mjs";
 import { going as workerGoing, settle, stateOf } from "../workers.mjs";
 import { removeCodexEntry } from "../uninstall.mjs";
 
@@ -183,6 +186,12 @@ Commit & Pull Request Guidelines
 (Optional) Add other sections if relevant, such as Security & Configuration Tips, Architecture Overview, or Agent-Specific Instructions.`;
 // What a thread runs with, as loading it says (thread/resume, thread/start) or Codex says it changed: what /status shows.
 const settingsOf = (r) => (r ? { model: r.model || null, effort: r.reasoningEffort || null, approvals: r.approvalPolicy || null, sandbox: r.sandbox?.type || null } : null);
+// A side thread's own turns: Codex's fork copies the thread's turns into it with their ids and start times, so the ones
+// that started before you sent it on the side (`side_at`) are the thread's, not its own.
+export function ownTurns(turns, sideAt) {
+  const from = sideAt ? Date.parse(sideAt) / 1000 : 0;
+  return from ? (turns || []).filter((t) => (Number(t.startedAt) || 0) >= Math.floor(from)) : turns || [];
+}
 const PLAN = { pending: "pending", inProgress: "in_progress", in_progress: "in_progress", completed: "completed" };
 
 // `edits` and `commits`: what the thread changed (changes.mjs). `noted`: the items already counted there.
@@ -626,7 +635,7 @@ export function createCodex(host) {
         th.turn = null;
         th.turnsHeard++;
         d.worked += Number(p.turn?.durationMs) || 0;
-        if (p.turn?.error?.message) host.commit({ t: "message.add", post: id, from: "agent", via: "dash", text: `Stopped: ${p.turn.error.message}` });
+        if (p.turn?.error?.message) host.commit({ t: "message.add", post: id, from: "agent", via: "dash", text: `Stopped: ${codexWhy(p.turn.error.message, host.machine)}` });
         else if (th.lastSay) host.commit({ t: "message.add", post: id, from: "agent", via: "dash", text: th.lastSay });
         th.lastSay = null;
         host.commit({ t: "session.status", post: id, state: "idle", text: p.turn?.status === "interrupted" ? "Stopped" : "Finished, waiting for your next message", turn: "end", settle_permissions: true });
@@ -1097,6 +1106,29 @@ export function createCodex(host) {
     return { id: t.id };
   }
 
+  // A side thread: the thread forked as it is, its copy going on with what you sent while the
+  // thread works on, untouched. The copy works where the thread works, with agentbook's tools as itself (`launch:`
+  // until its post is there, as a thread agentbook starts). Codex gives it the thread's name too: it's named after
+  // what you sent, there and here.
+  async function side({ id, cwd, prompt, shown = prompt, lid, effort, dirs = [] }) {
+    await connect();
+    cwd = cwd || cwdFor(id);
+    if (!cwd || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error(`No folder at ${cwd}`);
+    const extra = equip(`launch:${lid}`, cwd);
+    if (dirs.length) extra.config["sandbox_workspace_write.writable_roots"] = dirs;
+    const r = await loading("thread/fork", { threadId: id, cwd, excludeTurns: true }, extra);
+    const name = short(String(shown).split("\n")[0], 80) || "Side thread";
+    const t = { ...r.thread, name, preview: shown };
+    const th = thread(t.id);
+    th.subscribed = true;
+    th.settings = settingsOf(r);
+    await rpc("thread/name/set", { threadId: t.id, name }).catch((e) => log(`codex: couldn't name side thread ${t.id}: ${e.message}`));
+    ensurePost(t, { lid });
+    host.commit({ t: "message.add", post: t.id, from: "human", via: "dash", text: shown, resume: lid });
+    await sendTurn(t.id, prompt, { effort });
+    return { id: t.id };
+  }
+
   async function stop(id) {
     const th = threads.get(id);
     if (!th?.turn) throw new Error("It isn't working on anything right now.");
@@ -1113,7 +1145,7 @@ export function createCodex(host) {
       if (r?.thread) {
         const d = (th.digest = Object.assign(blank(), { model: th.digest.model, ai_title: th.digest.ai_title }));
         th.cwd = cwdOf(r.thread) || th.cwd || s?.cwd || "";
-        for (const turn of r.thread.turns || []) {
+        for (const turn of ownTurns(r.thread.turns, s?.side_at)) {
           for (const item of turn.items || []) {
             take(id, item, (turn.startedAt || 0) * 1000, false, false);
             take(id, item, (turn.completedAt || turn.startedAt || 0) * 1000, true, false);
@@ -1267,6 +1299,7 @@ export function createCodex(host) {
     begin,
     sync,
     start,
+    side,
     stop,
     deliver,
     steps,

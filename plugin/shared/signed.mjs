@@ -14,7 +14,7 @@ import crypto from "node:crypto";
 
 // The kinds a machine takes only when they're signed, once it keeps its owner's keys (gate.json can say otherwise):
 // each can run something, lose work, or tell an agent something as its owner.
-export const SIGNED_KINDS = ["post.start", "post.deliver", "post.answer", "post.notify", "folder.trust", "folder.restore", "workspace.clone", "wip.discard", "wip.clean", "cloud.pull", "post.apply", "post.run", "page_routine.run", "routine.do", "openclaw.pair", "remote.connect", "term.open", "term.lease", "claude.login"];
+export const SIGNED_KINDS = ["post.start", "post.deliver", "post.side", "post.answer", "post.notify", "folder.trust", "folder.restore", "workspace.clone", "wip.discard", "wip.clean", "cloud.pull", "post.apply", "post.run", "page_routine.run", "routine.do", "openclaw.pair", "remote.connect", "term.open", "term.lease", "claude.login", "cloud.setup", "seat.secret"];
 
 // What someone a machine's owner lets operate one of its agents may have it do: start a
 // thread with that agent, and message, answer, stop and queue on that agent's threads. Nothing else, ever: not its
@@ -53,4 +53,40 @@ export function needsSignature(c, kinds = SIGNED_KINDS) {
   if (c.kind === "post.answer" && (a.skip || a.archived) && a.value == null && !a.file) return false;
   if (c.kind === "page_routine.run" && reachesNothing(a.reach)) return false;
   return true;
+}
+
+const b64 = (s) => Buffer.from(String(s || ""), "base64url");
+const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest();
+// Why a passkey's signature over `payload` doesn't hold, or null when it does: by one of `keys`, on `origin`, for
+// `rpId`, with its person verified.
+export function assertionRefusal(payload, sig, { keys = [], origin, rpId } = {}) {
+  if (!sig || typeof sig !== "object") return "it isn't signed by its owner's passkey";
+  const key = keys.find((k) => k.id === sig.key);
+  if (!key) return "it's signed with a key this machine doesn't keep";
+  let client;
+  try {
+    client = JSON.parse(b64(sig.clientDataJSON).toString("utf8"));
+  } catch {
+    return "its signature is malformed";
+  }
+  if (client?.type !== "webauthn.get") return "its signature is malformed";
+  if (client.origin !== origin) return `it was signed on ${String(client.origin).slice(0, 120)}, not on ${origin}`;
+  if (client.challenge !== digestOf(payload)) return "its signature is for something else";
+  const auth = b64(sig.authenticatorData);
+  if (auth.length < 37 || !auth.subarray(0, 32).equals(sha256(Buffer.from(String(rpId || ""))))) return "its signature is for another site";
+  // User present, and verified: a face, a finger or a PIN, not just a tap.
+  if (!(auth[32] & 0x01) || !(auth[32] & 0x04)) return "it was signed without checking it was you";
+  const data = Buffer.concat([auth, sha256(b64(sig.clientDataJSON))]);
+  let good = false;
+  try {
+    const pub = crypto.createPublicKey({ key: b64(key.spki), format: "der", type: "spki" });
+    const s = b64(sig.signature);
+    if (key.alg === -7) good = crypto.verify("sha256", data, { key: pub, dsaEncoding: "der" }, s);
+    else if (key.alg === -8) good = crypto.verify(null, data, pub, s);
+    else if (key.alg === -257) good = crypto.verify("sha256", data, { key: pub, padding: crypto.constants.RSA_PKCS1_PADDING }, s);
+    else return "it's signed with a kind of key agentbook-cli doesn't check";
+  } catch {
+    good = false;
+  }
+  return good ? null : "its signature doesn't match";
 }

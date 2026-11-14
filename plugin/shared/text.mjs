@@ -42,12 +42,48 @@ export function untitled(t) {
   return `${head}${head.includes(" ") ? " " : ""}${t.note.slice(1)}`;
 }
 
+// An agent's `! command` in its text: Claude Code's way of saying "type this at its prompt". Outside a code block, a
+// table, a heading or a quote, the page draws each as a code block of its own (in sh), which ▶ runs: the same as
+// server/ui/commands.js, which test/runs.mjs checks this agrees with.
+const COMMAND = /`!\s+([^`\n]*[^`\s][^`\n]*)`/;
+const KEPT = /^\s*(\||#{1,6}\s|>)/;
+const ITEM = /^\s*([-*+]|\d+[.)])\s+/;
+const FENCE = /^\s*```/;
+export function commandFences(text) {
+  const all = String(text ?? "");
+  if (!all.includes("`!")) return all;
+  const out = [];
+  let fenced = false;
+  for (const line of all.split("\n")) {
+    const fence = FENCE.test(line);
+    if (fence) fenced = !fenced;
+    if (fence || fenced || KEPT.test(line) || !COMMAND.test(line)) {
+      out.push(line);
+      continue;
+    }
+    const item = line.match(ITEM);
+    let head = item ? item[0] : line.match(/^\s*/)[0];
+    const pad = head.replace(/\S/g, " ");
+    let rest = line.slice(head.length);
+    for (let m; (m = COMMAND.exec(rest)); ) {
+      const before = rest.slice(0, m.index).trimEnd();
+      if (before || head !== pad) out.push(`${head}${before}${/[\p{L}\p{N}]$/u.test(before) ? ":" : ""}`);
+      out.push(`${pad}\`\`\`sh`, `${pad}${m[1].trim()}`, `${pad}\`\`\``);
+      head = pad;
+      rest = rest.slice(m.index + m[0].length).replace(/^[\s.,;:!?)\]]+/, "");
+    }
+    if (rest.trim()) out.push(`${head}${rest}`);
+  }
+  return out.join("\n");
+}
+
 // The code blocks in a message, as the page draws them (md() in ui/app.js): each fenced block's lines, without the
-// fence's indent, and the language its fence names ("" for none). One left open runs to the end of the message.
+// fence's indent, and the language its fence names ("" for none), and each `! command` as a block in sh, numbered
+// where it is among them. One left open runs to the end of the message.
 export function codeBlocks(text) {
   const out = [];
   let code = null;
-  for (const line of String(text || "").split("\n")) {
+  for (const line of commandFences(text || "").split("\n")) {
     if (code) {
       if (/^\s*```/.test(line)) {
         out.push({ lang: code.lang, code: code.lines.join("\n") });

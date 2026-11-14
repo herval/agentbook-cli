@@ -15,11 +15,14 @@ import os from "node:os";
 import path from "node:path";
 import { BASE_URL, NOT_LOGGED_IN, VERSION as PLUGIN_VERSION, api, describe } from "../lib/common.mjs";
 import { secretFileRefusal } from "./redact.mjs";
+import { artifactPage, artifactUrl, docPage } from "./artifact.mjs";
 import { ATTACHABLE, CHART_KINDS, NODE_STATES, WIDTHS, widgetDocs } from "../shared/widgets.mjs";
 import { CHECKS, COMPARES, DRAFTS, FRAMES, LIMITS, PICKS, VERDICTS } from "../shared/shapes.mjs";
 import { RANGES, SHAPES } from "../shared/dashboards.mjs";
 import { AGENT_MAX } from "../shared/page-shape.mjs";
 import { fromServer, visualMode } from "./context.mjs";
+import { BIO_MAX, profileError } from "../shared/agent-profile.mjs";
+import { PICTURE_MAX, pictureOf } from "../shared/pictures.mjs";
 
 // Agents agentbook runs through a driver: it registers their posts and hands them what the person sends.
 const isDriven = (proc) => /^(launch|codex|hermes|openclaw|dsh|managed):/.test(String(proc));
@@ -46,7 +49,7 @@ const VERSION = PLUGIN_VERSION || "0.0.0";
 
 const DRIVEN_INSTRUCTIONS = `This conversation is a thread on agentbook, a page where the person follows all their agents, usually away from any terminal. Your steps and replies show up there on their own. Keep the thread itself useful, briefly:
 - ab_post: a headline for what you're doing, and a sentence or two on why or how. Set it once you know, and again if the goal changes.
-- ab_update: a result worth seeing, past tense: shipped, merged, found, decided, blocked. A few, not every step.
+- ab_update: a result worth seeing, past tense: shipped, merged, found, decided, blocked. A few, not every step. With notify: true, the one of a turn they'd want to hear of right away: it goes on their bell.
 - ab_ask: when you need a decision, approval, answer or file. Prefer it over stopping to ask. Until it's answered, don't build what it decides, not even on your default: do only what doesn't depend on it, then end your turn. The answer arrives as your next message.
 - ab_attach: something to keep in view on the thread: a table, a metric, a chart, a diagram, a note, a link.
 - ab_verdict (the one line of the reply that ends your turn) and ab_suggest (what they'd say next), right before that reply. ab_checks, ab_draft, ab_cards, ab_slots, ab_path, ab_highlight, ab_compare, ab_diagram, ab_chart only when text can't do the job. Your context says how to write the reply (Visual mode).
@@ -66,7 +69,7 @@ A Codex thread is a thread on agentbook when it's one you'd find in the Codex ap
 
 const instructions = (live) => `This session is a thread on agentbook, a page where the person follows all their agents' sessions. Your steps, plan (TodoWrite) and pull requests show up there on their own. Keep the thread itself useful, briefly:
 - ab_post: a headline for what this session is doing, and a sentence or two on why or how. Set it once you know, and again if the goal changes.
-- ab_update: a result worth seeing, past tense: shipped, merged, found, decided, blocked. A few per session, not every step.
+- ab_update: a result worth seeing, past tense: shipped, merged, found, decided, blocked. A few per session, not every step. With notify: true, the one of a turn they'd want to hear of right away: it goes on their bell.
 - ab_ask: when you need a decision, approval, answer or file and the person may not be watching the terminal. Prefer it over stopping to ask. It waits a few minutes for the answer; until it's answered, don't build what it decides, not even on your default: do only what doesn't depend on it, then end your turn, and the answer starts your next one.
 - ab_attach: something to keep in view on the thread: a table, a metric, a chart, a diagram, a note, a link.
 - ab_verdict (the one line of the reply that ends your turn) and ab_suggest (what they'd say next), right before that reply. ab_checks, ab_draft, ab_cards, ab_slots, ab_path, ab_highlight, ab_compare, ab_diagram, ab_chart only when text can't do the job. Your context says how to write the reply (Visual mode).
@@ -83,6 +86,20 @@ ${live
 
 const tools = [
   {
+    name: "ab_profile",
+    description: "Read or update your own agentbook profile, shared by all your threads. With no arguments, read it. Omitted fields stay as they are. Your bio and picture are visible to whoever can see your profile. This replaces a picture your person set too; reset_picture goes back to your runtime's picture or your letter.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        bio: { type: "string", maxLength: BIO_MAX, description: "A short bio, plain text, up to 500 characters. An empty string clears it." },
+        path: { type: "string", description: "A PNG, JPEG, GIF or WebP on your machine, up to 2 MB. Absolute or relative to your working folder. Pick only one of path, emoji, or reset_picture." },
+        emoji: { type: "string", description: "An emoji to use instead of a picture." },
+        reset_picture: { type: "boolean", description: "True removes the custom picture or emoji and restores your runtime's picture or your letter." },
+      },
+    },
+  },
+  {
     name: "ab_post",
     description: "Set your thread's headline (what this session is doing) and a short description. Do it once you know what the session is for, and again if the goal changes.",
     inputSchema: {
@@ -96,7 +113,15 @@ const tools = [
   {
     name: "ab_update",
     description: "Add a result to your thread, past tense: 'Opened PR #1182', 'Found the race in the checkout test'. A few per session, for turning points, not every step.",
-    inputSchema: { type: "object", properties: { text: { type: "string" }, link: { type: "string", description: "Optional URL: a PR, a CI run, a doc." } }, required: ["text"] },
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        link: { type: "string", description: "Optional URL: a PR, a CI run, a doc." },
+        notify: { type: "boolean", description: "true puts it on the person's bell too: the one result of this turn they'd want to hear about right away, away from the thread (you found the cause, it shipped, something broke). Once per turn at most, and not for progress. The end of a long turn and a pull request's news reach the bell on their own." },
+      },
+      required: ["text"],
+    },
   },
   {
     name: "ab_ask",
@@ -132,6 +157,21 @@ remove: true takes it off.`,
         remove: { type: "boolean" },
       },
       required: ["key"],
+    },
+  },
+  {
+    name: "ab_artifact",
+    description:
+      'Put a claude.ai artifact on your thread as a page they can see there (claude.ai won\'t be framed by another site, so its link alone only opens it). When they send a claude.ai/artifact/... link, or after you publish one. First get its content, which depends on its type (your Artifact tool\'s read of the link says which). A plain page or a Design canvas: list its files with your Artifact tool (action "list", scope "files") and read the ones it needs into one folder (action "read", paths): index.html for a page; project/canvas.json, the artboard\'s project/<name>.dc.html and artifact-type/dc-runtime.js for a canvas. Then call this with the link and that folder as `path`. A Claude Doc: read the doc with the Docs connector for its tabs\' ids, export each tab with its export tool (format "html"), then call this with the link and no `path`: agentbook takes the export from your conversation\'s record.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The artifact's claude.ai link." },
+        path: { type: "string", description: "The folder your Artifact tool saved its files under, or the HTML file you published. None for a Claude Doc you exported." },
+        board: { type: "string", description: "A Design canvas with several artboards: the one to show, by its file name (Main.dc.html). Without it, the one the canvas opens on." },
+        title: { type: "string" },
+      },
+      required: ["url"],
     },
   },
   {
@@ -775,6 +815,25 @@ async function callTool(name, args, who) {
   const disk = who.disk || localDisk;
   const where = who.cwd || disk.home;
   switch (name) {
+    case "ab_profile": {
+      const error = profileError(args);
+      if (error) return err(error);
+      const { path: file, ...body } = args;
+      if (file !== undefined) {
+        const p = pathOn(disk, where, file);
+        const secret = secretFileRefusal(p);
+        if (secret) return err(secret);
+        const st = await disk.stat(p);
+        if (!st) return err(`No file at ${p}`);
+        if (st.size > PICTURE_MAX) return err("That picture is too big: 2 MB at most.");
+        const buf = await disk.read(p);
+        pictureOf(buf);
+        body.content_base64 = buf.toString("base64");
+      }
+      const r = await call("POST", "/profile", body, { timeout: 30000 });
+      return text(`${r.changed ? "Profile updated for all your threads." : "Your agentbook profile."}\n${JSON.stringify(r.profile)}`);
+    }
+
     case "ab_post": {
       if (!args.title && args.text == null) return err("Give a title, a text, or both.");
       await call("POST", "/post", { title: args.title, text: args.text });
@@ -782,8 +841,11 @@ async function callTool(name, args, who) {
     }
 
     case "ab_update":
-      await call("POST", "/updates", { text: args.text, link: args.link });
-      return text("Added to your thread.");
+    {
+      const r = await call("POST", "/updates", { text: args.text, link: args.link, ...(args.notify === true ? { notify: true } : {}) });
+      if (args.notify !== true) return text("Added to your thread.");
+      return text(r?.notified ? "Added to your thread, and to their bell." : "Added to your thread. Not to their bell: it has one from this turn already.");
+    }
 
     case "ab_ask": {
       const options = Array.isArray(args.options) ? args.options : [];
@@ -833,6 +895,26 @@ async function callTool(name, args, who) {
       if (st.size > 50 * 1024 * 1024) return err("That file is over 50 MB.");
       await call("POST", "/files", { name: path.basename(p), title: args.title, draft: !!args.draft, content_base64: (await disk.read(p)).toString("base64") }, { timeout: 60000 });
       return text(`Shared ${path.basename(p)} on your thread.`);
+    }
+
+    case "ab_artifact": {
+      const url = artifactUrl(args.url);
+      if (!url) return err("That isn't a claude.ai artifact's link (https://claude.ai/artifact/...).");
+      let page;
+      if (args.path) {
+        const p = pathOn(disk, where, args.path);
+        const secret = secretFileRefusal(p);
+        if (secret) return err(secret);
+        page = await artifactPage(disk, p, { board: String(args.board || "") });
+      } else {
+        // A Claude Doc: what its session exported, from its conversation's record, which agentbook-cli reads.
+        const r = await call("POST", "/artifact-export", { url });
+        page = r.record === false ? { error: `agentbook has no record of your conversation to take an export from. Give them the link instead.` } : docPage(r.tabs || []);
+      }
+      if (page.error) return err(page.error);
+      const title = String(args.title || page.title || "Claude artifact").slice(0, 140);
+      await call("POST", "/files", { name: `${title.replace(/[^\w.\- ]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "artifact"}.html`, title, artifact: url, content_base64: Buffer.from(page.html).toString("base64") }, { timeout: 60000 });
+      return text(`It shows on your thread now, as a copy made just now (a later change on claude.ai won't reach it).${page.notes.length ? `\n${page.notes.join("\n")}` : ""}`);
     }
 
     case "ab_todo": {
@@ -1098,8 +1180,9 @@ export async function handle(msg, who) {
     case "ping":
       return reply({});
     case "tools/list":
-      // A driven agent's comments come from agentbook as its next message, so it has no inbox.
-      return reply({ tools: driven ? tools.filter((t) => t.name !== "ab_inbox") : tools });
+      // A driven agent's comments come from agentbook as its next message, so it has no inbox; and only Claude Code
+      // has the Artifact tool that ab_artifact's files come from.
+      return reply({ tools: driven ? tools.filter((t) => t.name !== "ab_inbox" && t.name !== "ab_artifact") : tools });
     case "tools/call":
       if (who.login) return reply(err(NOT_LOGGED_IN));
       // It would wait for an answer nobody can give. Everything else stays here, and goes up once it's logged in again.

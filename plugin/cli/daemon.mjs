@@ -7,12 +7,14 @@
 //
 // createCli() makes one; plugin/cli/main.mjs runs it, talking to its server over HTTP (uplink.mjs).
 
-import { execFile } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { attached, bird, describe, gitInfo, isVersion, LOGIN_LOST, NOT_LOGGED_IN, olderVersion, PLUGIN_ROOT, PORT, VERSION } from "../lib/common.mjs";
+import { attached, bird, describe, gitInfo, isVersion, LOGIN_LOST, NOT_LOGGED_IN, olderVersion, PLUGIN_ROOT, PORT, SEAT, seatsIn, VERSION } from "../lib/common.mjs";
+import { askHelper, SETUP_LOG as SEAT_SETUP_LOG, sharesHere } from "./seat-helper.mjs";
 import { claudeCommands, claudeModels, cleanEnv, createClaude, learnCommand, openTerminal } from "./drivers/claude.mjs";
 import { cloudSessionId, codexTaskId, createCloud } from "./drivers/cloud.mjs";
 import { createCodex } from "./drivers/codex.mjs";
@@ -32,11 +34,14 @@ import { branches, clone, cloneTarget, cloneUrl, commitsSince, currentBranch, go
 import { createGate, real, retiredThread } from "./gate.mjs";
 import { pinOf } from "./signatures.mjs";
 import { createRoutineRunner } from "./routines.mjs";
+import { createPidWatch } from "./pid-watch.mjs";
 import { createRuns } from "./runs.mjs";
 import { createTerminals } from "./terminals.mjs";
 import { installedByClaude } from "./uninstall.mjs";
 import { createGroupFiles } from "./group-files.mjs";
 import { forgetLeftovers } from "./leftovers.mjs";
+import { artifactLinks } from "../shared/mentions.mjs";
+import { docExports } from "./artifact.mjs";
 import { cleanPath } from "../shared/groups.mjs";
 import { ATTACHABLE, cleanData, noteLines } from "../shared/widgets.mjs";
 import { localPictures, shapeOf, withDraft } from "../shared/shapes.mjs";
@@ -50,8 +55,10 @@ import { conversationOf, createStore, fileOf, foldedInto, helloLaunch, PASSING_E
 import { githubRepo, prOfUrl, prUrl } from "../shared/prs.mjs";
 import { machineName } from "../shared/ids.mjs";
 import { going as workerGoing, goingOf as workersGoing, shown as shownWorkers } from "./workers.mjs";
-import { localPicture, picture, readPicture } from "../shared/pictures.mjs";
+import { localPicture, picture, readPicture, PICTURE_MAX, pictureOf } from "../shared/pictures.mjs";
+import { profileError } from "../shared/agent-profile.mjs";
 import { isLevel } from "../shared/visibility.mjs";
+import { cloneWhy } from "../shared/whynot.mjs";
 import { accept as acceptWs, refuse as refuseWs } from "../shared/ws.mjs";
 import { AUTH_HEADER, AUTH_WINDOW_MS, PROOF_HEADER, checkRequest, proofOf } from "../shared/local-auth.mjs";
 import { redact, redactDeep, secretFile, secretFileRefusal } from "./redact.mjs";
@@ -62,7 +69,7 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 // The routes this machine's sessions use, on loopback: the hooks, the MCP bridge, question long-polls, and
 // agentbook-cli's own commands. Everything else is the page's, on the server.
-const SESSION_ROUTES = [/^\/api\/health$/, /^\/api\/show$/, /^\/api\/hello$/, /^\/api\/procs\//, /^\/api\/mcp$/, /^\/api\/gate(\/approve)?$/, /^\/api\/status$/, /^\/api\/local\/openclaw(\/pair)?$/, /^\/api\/local\/remote$/, /^\/api\/local\/fold$/];
+const SESSION_ROUTES = [/^\/api\/health$/, /^\/api\/show$/, /^\/api\/hello$/, /^\/api\/procs\//, /^\/api\/mcp$/, /^\/api\/gate(\/approve)?$/, /^\/api\/status$/, /^\/api\/local\/openclaw(\/pair)?$/, /^\/api\/local\/remote$/, /^\/api\/local\/fold$/, /^\/api\/local\/git-github$/];
 export const isSessionRoute = (method, pathname) => SESSION_ROUTES.some((re) => re.test(pathname)) || (method === "GET" && /^\/api\/questions\/[^/]+$/.test(pathname));
 
 // `machine`: this machine's name, as its server knows it.
@@ -134,6 +141,8 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   const gitCache = new Map();
   // What drivers get from the CLI: its state, a way to change it, and the helpers they share.
   const driverHost = {
+    // This machine's name, for what a driver says can only be fixed here.
+    machine: MACHINE,
     state,
     commit,
     // Whether a session of theirs is kept off agentbook (Private terminals): it has no post, and gets none for now.
@@ -204,6 +213,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   const routinesOfAgent = (id) => (claudeRoutines.owns(id) ? claudeRoutines : driverOfAgent(id));
   // A page routine's code, run here when the server says (page_routine.run).
   const routineRunner = createRoutineRunner({ home: HOME, log });
+  const pids = createPidWatch({ home: HOME });
   // A terminal for its owner, in a post's folder as this machine has it (terminals.mjs), talking to the page through
   // the server on its own line; its shell outlives agentbook-cli, which finds it again as it starts.
   const terminals = createTerminals({ home: CLI_HOME, line: () => uplink?.termSocket?.() ?? null, hosted, log });
@@ -323,17 +333,90 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     const a = claude.info(s.session_id);
     return a && !claude.running(a) ? list.map((w) => (workerGoing(w) ? { ...w, state: "stopped", ended: s.updated || null, step: null } : w)) : list;
   }
-  // What a session has going between its turns: its workers still going, and for a background session, what Claude
-  // Code lists (a shell watching a CI run, a monitor). Its turn ended, but it's working on those, and hears back when
-  // they finish. A command is called what its step was.
+  // What a Claude Code session that isn't a background one (a terminal's, Claude Desktop's, VS Code's) left running
+  // in the background: Claude Code keeps no list of it, so it's what its transcript says started and hasn't said
+  // stopped. They run under its process: with that gone, nothing would hear them finish.
+  function leftBy(s) {
+    const a = claude.info(s.session_id);
+    return a && a.kind !== "background" && claude.running(a) ? transcripts.left(s) : [];
+  }
+  // What a session has going between its turns: its workers still going, and what it left running in the background
+  // (a shell watching a CI run, a monitor): what Claude Code lists for a background session, and for any other, what
+  // its transcript says (leftBy). Its turn ended, but it's working on those, and hears back when they finish. A
+  // command is called what its step was.
   function goingOf(s) {
     if (!s || s.busy || s.cloud) return null;
-    const own = driverOf(s) ? [] : claude.workOf(s.session_id).map((w) => ({ id: w.id, kind: w.kind, title: transcripts.taskTitle(s, w.id) || w.label, started: w.started }));
+    const own = driverOf(s) ? [] : [...claude.workOf(s.session_id).map((w) => ({ id: w.id, kind: w.kind, title: transcripts.taskTitle(s, w.id) || w.label, started: w.started })), ...leftBy(s)];
     // A subagent Claude Code lists too (by its id for it, or its name) is the one worker.
     const ids = new Set(own.flatMap((x) => [x.id, x.title]));
     const workers = workersOf(s).filter((w) => !ids.has(w.agent) && !ids.has(w.title));
     const all = [...own, ...workersGoing(workers)];
     return all.length ? all : null;
+  }
+  // Whether stopping this machine now would cut something off: a turn
+  // running or waiting on its person, a start under way, something sent that a thread hasn't taken yet, work a
+  // thread left going between its turns (a background shell, a monitor, a scheduled wakeup, a worker), or a terminal
+  // open. What a thread's own sleep looks at (sleepIdle), for the whole machine. Its server moves the sandbox's
+  // auto-stop by it; nothing here stops anything.
+  const STARTED_AT = new Date().toISOString();
+  // A seat's own secrets (seat.secret, further down), read as this starts so what it starts has them.
+  function seatSecrets() {
+    try {
+      const all = JSON.parse(fs.readFileSync(path.join(CLI_HOME, "secrets.json"), "utf8"));
+      return all && typeof all === "object" ? Object.fromEntries(Object.entries(all).filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(k) && typeof v === "string")) : {};
+    } catch {
+      return {};
+    }
+  }
+  if (SEAT) for (const [k, v] of Object.entries(seatSecrets())) process.env[k] = v;
+  // A shared machine's code, which every seat on it works in (seats.mjs's /work).
+  const WORK_DIR = process.env.AGENTBOOK_WORK_DIR || "/work";
+  const realOf = (p) => {
+    try {
+      return fs.realpathSync.native(p);
+    } catch {
+      return path.resolve(String(p));
+    }
+  };
+  const sharedWork = (p) => !!SEAT && !!p && (realOf(p) === realOf(WORK_DIR) || realOf(p).startsWith(realOf(WORK_DIR) + path.sep));
+  // The last time this machine ran its image's script (cloud.setup): { v, state: "running" | "ok" | "failed", step,
+  // error }, or null when it never did. From the script's own log, ~/.agentbook-build.log, whose lines say each
+  // part and how it ended (server/image-script.mjs writes them).
+  const SETUP_MARK = path.join(CLI_HOME, "cloud-setup.json");
+  // In a seat, the machine's root helper ran it, as the sandbox's own first user, and its log is beside the spool.
+  const SETUP_LOG = () => process.env.AGENTBOOK_BUILD_LOG || (SEAT ? SEAT_SETUP_LOG() : path.join(os.homedir(), ".agentbook-build.log"));
+  function cloudSetup() {
+    let mark;
+    try {
+      mark = JSON.parse(fs.readFileSync(SETUP_MARK, "utf8"));
+    } catch {
+      return null;
+    }
+    let text = "";
+    try {
+      // A log from before this run says nothing of it.
+      if (fs.statSync(SETUP_LOG()).mtimeMs >= mark.started - 2000) text = fs.readFileSync(SETUP_LOG(), "utf8").slice(-20000);
+    } catch {}
+    const end = /^::end (ok|failed)/m.exec(text)?.[1];
+    const steps = [...text.matchAll(/^::step (.*)$/gm)].map((m) => m[1]);
+    const failed = /^::failed (.*)$/m.exec(text)?.[1];
+    if (end === "ok") return { v: mark.v, state: "ok" };
+    if (end === "failed" || failed) {
+      const out = text.slice(0, text.search(/^::failed /m)).trim().split("\n").filter((l) => l && !l.startsWith("::")).at(-1) || "";
+      return { v: mark.v, state: "failed", error: `It stopped at ${failed || steps.at(-1) || "its start"}${out ? `: ${out.slice(0, 300)}` : ""}` };
+    }
+    if (Date.now() - mark.started > 3600e3) return { v: mark.v, state: "failed", error: "Its script didn't finish in an hour." };
+    return { v: mark.v, state: "running", step: steps.at(-1) || null };
+  }
+  function machineBusy() {
+    if (terminals.open() > 0) return true;
+    if (Object.values(state.launches).some((l) => !l.post && !l.error && Date.now() - (Date.parse(l.at) || 0) < 10 * 60e3)) return true;
+    return Object.values(state.sessions).some((s) => {
+      if (s.state === "done" || s.asleep || s.cloud) return false;
+      if (s.busy || s.state !== "idle" || waking.has(s.id) || sleeping.has(s.id) || starting(s) || store.pending(s.id).length) return true;
+      if (goingOf(s)) return true;
+      return !driverOf(s) && ["busy", "waiting"].includes(claude.info(s.session_id)?.status);
+    });
   }
   // What the page shows of this machine that its store doesn't have: each post's runtime and what it's doing this
   // moment, each agent's extras, the machine's folders, and the machine itself. Keys are replaced whole when they
@@ -341,7 +424,13 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   function info() {
     const out = {};
     const clones = cloneDir();
-    out.machine = { name: MACHINE, os: `${os.platform()} ${os.release()}`, home: os.homedir(), clone_dir: clones, drivers: Object.fromEntries(drivers.map((d) => [d.prefix, d.status()])), cli: VERSION || "unknown", gate: gate.summary() };
+    out.machine = { name: MACHINE, os: `${os.platform()} ${os.release()}`, home: os.homedir(), clone_dir: clones, drivers: Object.fromEntries(drivers.map((d) => [d.prefix, d.status()])), cli: VERSION || "unknown", gate: gate.summary(), ...(SEAT ? { seat: SEAT.name, shares: sharesHere(SEAT.name), secrets: Object.keys(seatSecrets()).sort(), ...(sharesHere(SEAT.name) ? { seats: Object.keys(seatsIn()?.seats || {}).sort() } : {}) } : {}) };
+    // In a cloud sandbox (its server says so): whether stopping it now would cut something off.
+    // And how its image's script went, when it ran one here (an Update).
+    if (prefs.cloud) {
+      const setup = cloudSetup();
+      out.pace = { busy: machineBusy() || setup?.state === "running", started: STARTED_AT, ...(setup ? { setup } : {}) };
+    }
     const v = publicState(state);
     out.folders = { folders: knownFolders(v.folders, clones), cloning: [...cloning.values()].map(({ repo, dir, error }) => ({ repo, dir, error })) };
     for (const s of v.sessions) {
@@ -470,7 +559,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
         return to.dir;
       },
       (e) => {
-        job.error = `Couldn't clone ${url}: ${e.message}`;
+        job.error = cloneWhy(url, e.message, MACHINE);
         log(job.error);
         pageChanged();
         throw new Error(job.error);
@@ -561,7 +650,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   // as working: it hears back when that's done, in a turn of its own, and what you queue waits for that turn too. A
   // Claude Code session's as its saved state says now (goingOf's list is a refresh old, and the turn that ends it
   // can be shorter than that).
-  const goingNow = (s) => !s.busy && !s.cloud && !s.asleep && (driverOf(s) ? !!goingOf(s) : claude.backgroundWork(s.session_id) > 0);
+  const goingNow = (s) => !s.busy && !s.cloud && !s.asleep && (driverOf(s) ? !!goingOf(s) : claude.backgroundWork(s.session_id) > 0 || leftBy(s).length > 0);
   function releaseNext(post) {
     const s = state.sessions[post];
     const [next] = queueOf(post);
@@ -635,6 +724,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
       setTimeout(() => work.touch(op.post, { changes: true, now: true }), 1500).unref();
     }
     if (op.t === "session.hello") work.touch(state.procs[op.proc]);
+    if (op.t === "session.hello") pids.saw(state.procs[op.proc], op.pid);
     // A post that ended or fell asleep: all of its work, now that it's done. One a copy folded into: the copy's.
     if (op.t === "session.gone" || op.t === "session.sleep" || op.t === "session.fold") work.touch(op.post, { changes: true, now: true });
     // Its queue: the next one goes in once its turn is over (or what held it lets go), and one that ended holds it.
@@ -758,6 +848,7 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   const commanded = new Map(); // post -> the slash command agentbook last woke it with: { name, bare, at }
   const sleeping = new Map(); // post -> why agentbook is putting it to sleep
   const resumes = new Set(); // launches resuming an ended thread, until it's back or they failed
+  let sweptGone = false; // whether the sessions from before it started have been looked at (processGone)
   async function syncRuntime() {
     const changed = await claude.refresh();
     // Claude Code is an agent here once its supervisor answers, before it has a thread: a machine that never ran a
@@ -775,6 +866,13 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
       if (a?.kind !== "background" || claude.running(a)) continue;
       if (a.state === "failed") commit({ t: "session.gone", post: s.id, reason: "Failed" });
       else asleep(s.id);
+    }
+    // Once, with the first listing: a session whose process went with the machine (it restarted, or a cloud sandbox
+    // stopped) or was killed while this was off has ended, rather than waiting in a terminal that isn't there.
+    if (!sweptGone && claude.listedAt()) {
+      sweptGone = true;
+      for (const s of Object.values(state.sessions)) if (await processGone(s)) commit({ t: "session.gone", post: s.id, reason: "Ended" });
+      pids.keepOnly(Object.values(state.sessions).filter((s) => s.state !== "done").map((s) => s.id));
     }
     blockedOnLogin();
     // An ended thread you wrote on, whose resume Claude Code gave up on: it says why, instead of "Resuming it" and
@@ -1355,6 +1453,72 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     send(res, r.error ? 503 : 200, r.error ? `agentbook-server can't be reached; try again (${r.error}).` : hosted() ? fromServer("agentbook", r.text) : r.text, "text/plain; charset=utf-8");
   });
 
+  /* ---------- git's sign-in to GitHub, on a cloud machine (git-credential.mjs) ---------- */
+
+  // The helper git runs is this plugin's git-credential.mjs, in this person's own git config, for github.com only.
+  // Taken away, only a helper that is ours goes: one they set themselves stays.
+  let gitHelperSet = false;
+  let gitToken = null; // { token, username, until }: the server's answer, kept in memory for a few minutes
+  const GIT_KEY = "credential.https://github.com.helper";
+  const gitHelper = () => `!'${process.execPath}' '${path.join(path.dirname(fileURLToPath(import.meta.url)), "git-credential.mjs")}'`;
+  function setGitHelper(on) {
+    const git = (...args) => spawnSync("git", ["config", "--global", ...args], { encoding: "utf8" });
+    const have = (git("--get-all", GIT_KEY).stdout || "").split("\n").filter(Boolean);
+    const ours = have.filter((h) => h.includes("git-credential.mjs"));
+    if (on) {
+      if (ours.length === 1 && ours[0] === gitHelper() && have.at(-1) === ours[0]) return;
+      // An empty one first: git then asks no helper set before it (the system's), only this one.
+      git("--replace-all", GIT_KEY, "");
+      const r = git("--add", GIT_KEY, gitHelper());
+      log(r.status === 0 ? "git: signs in to GitHub as this machine's owner, with their agentbook GitHub connector" : `git: couldn't set its GitHub sign-in up: ${(r.stderr || "").trim()}`);
+    } else if (ours.length) {
+      git("--unset-all", GIT_KEY);
+      log("git: no longer signs in to GitHub through agentbook");
+    }
+  }
+  // gh, the same way (git-credential.mjs's `gh`): a small `gh` of agentbook's ahead of the real one on PATH, in
+  // ~/.local/bin, which hands the real gh its owner's token for one command. On a Linux machine in a cloud sandbox
+  // only (AGENTBOOK_GH_SHIM_DIR: the tests' folder for it). Only a file agentbook wrote is replaced or removed.
+  const GH_MARK = "# agentbook: gh signs in to GitHub as this machine's owner";
+  function setGhShim(on) {
+    const dir = process.env.AGENTBOOK_GH_SHIM_DIR || (process.platform === "linux" ? path.join(os.homedir(), ".local", "bin") : null);
+    if (!dir) return;
+    const file = path.join(dir, "gh");
+    let have = null;
+    try {
+      have = fs.readFileSync(file, "utf8");
+    } catch {}
+    const ours = !!have && have.includes(GH_MARK);
+    try {
+      if (!on) {
+        if (ours) fs.rmSync(file, { force: true });
+        if (ours) log("gh: no longer signs in to GitHub through agentbook");
+        return;
+      }
+      if (have != null && !ours) return void log(`gh: ${file} is something else, so gh there keeps its own sign-in`);
+      const text = `#!/bin/sh\n${GH_MARK}\n# (agentbook-cli wrote this, and removes it. The real gh is the next one on PATH.)\nAGENTBOOK_GH_SHIM="$0" exec '${process.execPath}' '${path.join(path.dirname(fileURLToPath(import.meta.url)), "git-credential.mjs")}' gh "$@"\n`;
+      if (have === text) return;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(file, text, { mode: 0o755 });
+      fs.chmodSync(file, 0o755);
+      log(`gh: signs in to GitHub as this machine's owner, through ${file}${(process.env.PATH || "").split(path.delimiter).includes(dir) ? "" : ` (${dir} isn't on agentbook-cli's PATH: sessions need it ahead of gh's own folder)`}`);
+    } catch (e) {
+      log(`gh: couldn't set its GitHub sign-in up: ${e.message}`);
+    }
+  }
+  route("GET", "/api/local/git-github", async (req, res) => {
+    // Only with this machine's key (cli/local.key, in its person's home): on a shared machine another person's
+    // process can reach this port, and must never get this person's token.
+    if (!localKeyOk(req)) return fail(res, 403, "That takes this machine's key (cli/local.key).");
+    if (!prefs.git_github) return fail(res, 404, "agentbook doesn't sign git in to GitHub on this machine.");
+    if (!gitToken || gitToken.until < Date.now()) {
+      const r = await ask("POST", "/git/github", {});
+      if (r.error || !r.token) return fail(res, r.status || 503, r.error || "The server gave no GitHub sign-in.");
+      gitToken = { token: String(r.token), username: r.username || "x-access-token", until: Date.now() + 5 * 60e3 };
+    }
+    ok(res, { token: gitToken.token, username: gitToken.username });
+  });
+
   /* ---------- asking the server ---------- */
 
   // The server's answer to something only it knows (tasks, pages, the feed), or { error } when it can't be
@@ -1430,8 +1594,9 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   // Visual mode, for every agent: what its sessions are told
   // when they start (contextFor), and reminded of as each turn starts.
   const VISUAL_REMINDER = "agentbook, Visual mode: the person reads this turn's reply at a glance, on a phone. The answer in the first sentence, then only what changes their next move, in whole sentences, nothing twice, under 120 words unless they asked for detail. Right before it: ab_verdict (the one line, which the reply doesn't repeat) and ab_suggest (what they'd say next). Other shapes only when text can't do it: ab_checks for a failed check, ab_todo with answers for a decision of theirs, ab_compare for pictures or numbers, ab_cards for alternatives, ab_draft for something to send.";
-  // The agents that can write pages: the ones agentbook gives its MCP server to.
-  const PAGE_WRITERS = ["claude-code", "codex"];
+  // The agents that can write pages: the ones that have agentbook's tools (OpenClaw's through its plugin on the
+  // gateway, Hermes' per session).
+  const PAGE_WRITERS = ["claude-code", "codex", "openclaw", "hermes"];
   route("GET", "/api/procs/:proc/context", async (req, res, { params, query }) => {
     const post = postOf(res, params.proc);
     if (!post) return;
@@ -1666,6 +1831,19 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   const wakers = new Map(); // post -> { n, at }
   const wakeable = (post) => (wakers.get(post)?.n || 0) > 0 || Date.now() - (wakers.get(post)?.at || 0) < 5000;
 
+  // A Claude Code session whose process is gone without saying so: killed, or its machine restarted under it (a
+  // stopped cloud sandbox), so no SessionEnd came. It's ended, not waiting in a terminal nobody has. Its pid says so
+  // first (pid-watch.mjs), then Claude Code's supervisor, which lists a session in a terminal only while it runs (and
+  // never a `claude -p` run): it doesn't list it running. Either one alone could be wrong, so it takes both.
+  async function processGone(s) {
+    if (!s || s.state === "done" || s.asleep || driverOf(s) || s.cloud || !s.session_id || state.agents[s.agent]?.kind !== "claude-code") return false;
+    if (waking.has(s.id) || resuming(s) || !(await pids.gone(s))) return false;
+    if (Date.now() - (claude.listedAt() || 0) > 5000) await claude.refresh().catch(() => {});
+    if (!claude.listedAt()) return false;
+    const a = claude.info(s.session_id);
+    return !(a && (a.kind === "background" || claude.running(a)));
+  }
+
   // Long-poll: the live delivery loop waits here, and hooks and ab_inbox take events without waiting.
   // `idle=1`: the Wake hook of a session sitting at its prompt in a terminal, which wakes it when something
   // arrives. It ends with `idle: false` when the session isn't idle (still finishing its turn), and with
@@ -1744,6 +1922,27 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     const meta = m?.params?._meta;
     return String(meta?.threadId || meta?.["x-codex-turn-metadata"]?.thread_id || "");
   };
+  // The session a tool call is from, when the server it came through isn't one session's: Claude Desktop starts the
+  // servers in its own config once, for the app, and hands them to every Code session it runs, so a session there
+  // has agentbook's tools twice (the plugin's server, its own, and the app's), and a call through the app's names
+  // the app's process. Such a call wrote to a thread of that process's, which nobody reads: the session's headline,
+  // verdict and suggested replies never reached its own thread. A server is taken for shared when its process isn't
+  // a Claude Code session agentbook knows; the session is the one whose transcript has this call unanswered
+  // (transcripts.caller), looked for a moment, since the transcript is written just after the call is made. With
+  // none (a chat in the app, which has no transcript here), the call is its process's own, as before.
+  const CALLER_WAIT = 1500;
+  async function callerOf(proc, m) {
+    if (m?.method !== "tools/call" || !proc || /^(launch|codex|hermes|openclaw|dsh|managed):/.test(proc)) return null;
+    if (state.sessions[postKeyOf(proc)]?.session_id) return null;
+    const making = () => Object.values(state.sessions).filter((s) => s.session_id && s.busy && s.proc && s.proc !== proc && !s.ended && !s.asleep && !s.cloud && !driverOf(s) && state.procs[s.proc] === s.id);
+    const id = m.params?._meta?.["claudecode/toolUseId"];
+    for (const end = Date.now() + CALLER_WAIT; ; await new Promise((r) => setTimeout(r, 150))) {
+      const sessions = making();
+      if (!sessions.length) return null;
+      const s = transcripts.caller(sessions, String(m.params?.name || ""), m.params?.arguments || {}, typeof id === "string" ? id : null);
+      if (s || Date.now() > end) return s;
+    }
+  }
   route("POST", "/api/mcp", async (req, res, { query }) => {
     const fixed = query.get("proc");
     const forCodex = !fixed && query.get("agent") === "codex";
@@ -1754,13 +1953,13 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     } catch (e) {
       return send(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: e.message } });
     }
-    const whoFor = (m) => {
+    const whoFor = async (m) => {
       const thread = forCodex && codexThreadOf(m);
-      const proc = forCodex ? `codex:${thread ? codex.postOf(thread) : ""}` : fixed;
+      const proc = forCodex ? `codex:${thread ? codex.postOf(thread) : ""}` : (await callerOf(fixed, m))?.proc || fixed;
       const launch = proc.startsWith("launch:") ? state.launches[proc.slice(7)] : null;
       return { proc, live: query.get("live") === "1", codex: forCodex, cwd: query.get("cwd") || state.sessions[postKeyOf(proc)]?.cwd || launch?.root || null, login: !started, loginLost: loginLost() };
     };
-    const answers = (await Promise.all((Array.isArray(body) ? body : [body]).map((m) => mcp.handle(m, whoFor(m))))).filter(Boolean);
+    const answers = (await Promise.all((Array.isArray(body) ? body : [body]).map(async (m) => mcp.handle(m, await whoFor(m))))).filter(Boolean);
     if (!answers.length) {
       res.writeHead(202);
       return res.end();
@@ -1815,15 +2014,45 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     ok(res);
   });
 
+  // Its profile belongs to its agent, across threads. The server keeps it alongside the owner's avatar choice.
+  route("POST", "/api/procs/:proc/profile", async (req, res, { params }) => {
+    const b = await readBody(req);
+    const post = postOf(res, params.proc);
+    if (!post) return;
+    const error = profileError(b, "content_base64");
+    if (error) return fail(res, 400, error);
+    const { content_base64, ...fields } = b;
+    if (content_base64 !== undefined) {
+      if (content_base64.length > Math.ceil(PICTURE_MAX / 3) * 4) return fail(res, 400, "That picture is too big: 2 MB at most.");
+      const buf = Buffer.from(content_base64, "base64");
+      let pic;
+      try {
+        pic = pictureOf(buf);
+      } catch (e) {
+        return fail(res, 400, e.message);
+      }
+      fields.blob = await blobPut(buf, pic.type);
+      if (!fields.blob) return fail(res, 502, "The picture couldn't reach agentbook-server. Your profile wasn't changed.");
+    }
+    // A just-started thread must reach the server before it can resolve the agent there.
+    await uplink?.flush();
+    await askOr(res, "POST", "/profile", { post, ...fields }, 30000);
+  });
+
   route("POST", "/api/procs/:proc/updates", async (req, res, { params }) => {
     const b = await readBody(req);
     const post = postOf(res, params.proc);
     if (!post) return;
     if (!b.text) return fail(res, 400, "text is required");
-    commit({ t: "session.update", post, text: str(b.text, 300), link: /^https?:\/\//.test(b.link || "") ? str(b.link, 500) : null });
+    // `notify`: on its person's bell too (server/news.mjs), once a turn: a second one in the turn is a result like any
+    // other, and its agent hears so.
+    const s = state.sessions[post];
+    const used = b.notify === true && (s?.updates || []).some((u) => u.notify && u.at >= (s.turn_started || ""));
+    const notify = b.notify === true && !used;
+    commit({ t: "session.update", post, text: str(b.text, 300), link: /^https?:\/\//.test(b.link || "") ? str(b.link, 500) : null, ...(notify ? { notify: true } : {}) });
     keepPictures(post, b.text);
     if (b.link) agentLinked(post, String(b.link));
-    ok(res);
+    ok(res, b.notify === true ? { ok: true, notified: notify } : undefined);
   });
 
   route("POST", "/api/procs/:proc/attachments", async (req, res, { params }) => {
@@ -1870,8 +2099,19 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     const via = b.via === "terminal" ? "terminal" : "dash";
     // Its closing words stay out when it already answered on agentbook, unless they're what its turn's shape
     // (ab_verdict, ab_checks, ab_suggest) goes on.
+    // The next-step box a Claude Desktop session ended its turn on (transcripts.wrapUp), when it suggested no
+    // replies itself (ab_suggest): its buttons are the replies under these closing words, and its question, which
+    // Desktop has it leave out of them, ends them.
+    let text = str(b.text, 12000);
+    const s = state.sessions[post];
+    const box = from === "agent" && via === "terminal" && s && !driverOf(s) && !s.shape?.replies ? transcripts.wrapUp(s) : null;
+    if (box) {
+      const r = box.replies.length ? shapeOf({ replies: box.replies }) : null;
+      if (r?.shape) commit({ t: "session.shape", post, shape: r.shape });
+      if (box.ask && !text.includes(box.ask)) text = str(`${text}\n\n${box.ask}`, 12000);
+    }
     if (from === "agent" && via === "terminal" && answeredOnDash(post) && !state.sessions[post]?.shape) return ok(res, { skipped: "answered on agentbook" });
-    commit({ t: "message.add", post, from, via, text: str(b.text, 12000) });
+    commit({ t: "message.add", post, from, via, text });
     if (from === "agent") keepPictures(post, b.text);
     ok(res);
   });
@@ -1971,9 +2211,24 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     const embedded = !!b.embedded;
     // Its bytes go to the server too, so the file opens there while this machine is off.
     const blob = await blobPut(buf);
-    const op = commit({ t: "file.add", post, from: "agent", name, title: str(b.title || name, 140), size: buf.length, stored: storeFile(buf, name), draft: !!b.draft, embedded, ...(blob ? { blob } : {}) });
+    // A copy of a claude.ai artifact (ab_artifact): its link, so the thread shows it as that artifact's page.
+    const artifact = typeof b.artifact === "string" && /\.html?$/i.test(name) ? (artifactLinks(b.artifact)[0] ?? null) : null;
+    const op = commit({ t: "file.add", post, from: "agent", name, title: str(b.title || name, 140), size: buf.length, stored: storeFile(buf, name), draft: !!b.draft, embedded, ...(blob ? { blob } : {}), ...(artifact ? { artifact } : {}) });
     if (!embedded) commit({ t: "message.add", post, from: "agent", via: "dash", text: "", file_id: `f${op.seq}` });
     ok(res, { id: `f${op.seq}`, url: `/api/files/f${op.seq}` });
+  });
+
+  // A Claude Doc's page for ab_artifact: the HTML its session exported with the Docs connector, which reached the
+  // session inside a tool's result, so it's read from the session's own conversation record (artifact.mjs).
+  route("POST", "/api/procs/:proc/artifact-export", async (req, res, { params }) => {
+    const b = await readBody(req);
+    const post = postOf(res, params.proc);
+    if (!post) return;
+    const url = artifactLinks(String(b.url || ""))[0];
+    if (!url) return fail(res, 400, "url isn't a claude.ai artifact's link");
+    const record = state.sessions[post].transcript;
+    const text = record ? readText(record) : null;
+    ok(res, { tabs: text ? docExports(text, url) : [], record: text != null });
   });
 
   // ?wait=N: hold the request up to N seconds until it's answered.
@@ -2656,8 +2911,14 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   // `command`: a slash command's name, when that's what you wrote (`text` is the command as typed), for a thread that
   // runs them from here; elsewhere it goes as words.
   commands["post.deliver"] = async ({ post, text = "", files: refs = [], bare = false, note = null, routine = null, queue = false, command = null }, c = null) => {
-    const s = state.sessions[post];
+    let s = state.sessions[post];
     if (!s) return no(404, "No such thread");
+    // One whose process is gone without saying so has ended: your message resumes it, as it would an ended one.
+    if (await processGone(s)) {
+      commit({ t: "session.gone", post, reason: "Ended" });
+      s = state.sessions[post];
+      if (!s) return no(404, "No such thread");
+    }
     // From someone its owner lets operate it: its agent reads who, before their words (and again if it's sent again).
     const user = operatorOf(c);
     const typed = !!command && text.startsWith(`/${command}`) && /^(\s|$)/.test(text.slice(command.length + 1));
@@ -2692,6 +2953,35 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     if (!claude.info(s.session_id)) await claude.refresh().catch(() => {});
     if (!claude.background(s.session_id)) return { stuck: "terminal" };
     return {};
+  };
+  // What you sent on the side: a side thread, a new Claude Code session that goes on from this
+  // thread's conversation so far with what you wrote, in the background, in the same folder, while this thread goes on
+  // as it was (busy, idle or ended) and never hears of it. This thread shows what you sent, with the side thread's
+  // launch; the side thread is started from it (started_from) and its own from what you wrote (side_at).
+  commands["post.side"] = async ({ post, text = "", files: refs = [], note = null }) => {
+    const s = state.sessions[post];
+    if (!s) return no(404, "No such thread");
+    // A Codex thread's goes through its driver (thread/fork); a Claude Code thread's is a fork of its saved conversation.
+    const drv = driverOf(s);
+    const kind = state.agents[s.agent]?.kind;
+    if (s.cloud || !s.session_id || (drv ? !drv.side || kind !== "codex" : kind !== "claude-code")) return no(409, "Only a Claude Code or Codex thread on this machine can go on in a side thread.");
+    if (!drv && s.transcript && !fs.existsSync(s.transcript)) return no(409, "Claude Code has no conversation saved for this thread, so there's nothing to go on from.");
+    if (!String(text).trim()) return no(400, "Write what the side thread should do.");
+    const files = await fetchFiles(refs, null);
+    const lid = launchId();
+    const cwd = resumeDir(s);
+    commit({ t: "launch.add", lid, agent: s.agent, root: s.root || cwd, ...(cwd !== (s.root || cwd) ? { cwd } : {}), prompt: text, files, named: true, side_of: post, ...(s.visibility ? { visibility: s.visibility } : {}) });
+    commit({ t: "message.add", post, from: "human", via: "side", text, launch: lid });
+    try {
+      const prompt = withFiles([text, note].filter(Boolean).join("\n\n"), files);
+      const r = drv ? await drv.side({ id: s.session_id, cwd, prompt, ...(note ? { shown: withFiles(text, files) } : {}), lid, dirs: extraDirs(s) }) : await claude.fork({ sessionId: s.session_id, cwd, prompt, lid, dirs: extraDirs(s) });
+      commit({ t: "launch.started", lid, session: r.id });
+      log(`${s.label}: started a side thread (${r.id})`);
+      return { lid };
+    } catch (e) {
+      commit({ t: "launch.fail", lid, error: e.message });
+      return no(500, e.message);
+    }
   };
   // A message of yours that couldn't be delivered: sent again, as it was kept here, or deleted.
   const failedMessage = (post, mid) => conversationOf(state, post).find((m) => m.id === mid && m.from === "human");
@@ -2789,6 +3079,8 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
   commands["keys.change"] = async ({ change }) => {
     const r = gate.applyKeysChange(change);
     await keysSaid();
+    // A shared machine's helper goes by its owner's passkeys too: it takes the same signed change, and checks it itself.
+    if (SEAT && sharesHere(SEAT.name)) askHelper({ kind: "keys.change", change }, { waitMs: 8000 }).then((h) => h.error && log(`keys: the seats helper didn't take the change: ${h.error}`), () => {});
     return r;
   };
   // Who else may operate one of its agents, as its gate checked it.
@@ -3249,6 +3541,80 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     }
   };
   // A repo none of the person's machines has a checkout of, cloned here when they add it as a workspace.
+  // An Update: this cloud machine runs a newer version of its image's script on its own disk, as a job of its own
+  // that outlives this process (the script ends by starting agentbook-cli again, with the new code). How it went is
+  // read from its log (cloudSetup), which the server hears with this machine's pace.
+  // In a seat (every machine agentbook makes), nothing here has sudo, so the machine's root helper runs it: it gets
+  // the whole command as its owner's passkey signed it, and checks that itself (seat-helper.mjs).
+  commands["cloud.setup"] = async ({ script, v }, c) => {
+    const fake = process.env.AGENTBOOK_CLOUD_SETUP_SHELL; // the tests', which run no real script
+    if (!prefs.cloud) return no(409, "Only a machine in a cloud sandbox takes its image's script.");
+    if (SEAT && !fake) {
+      if (cloudSetup()?.state === "running") return no(409, "It's being updated already.");
+      const r = await seatAsk({ kind: "cloud.setup", command: c });
+      if (r?.error) return r;
+      try {
+        fs.mkdirSync(CLI_HOME, { recursive: true });
+        fs.writeFileSync(SETUP_MARK, JSON.stringify({ v: Number(v) || 0, started: Date.now() }));
+      } catch {}
+      log(`cloud setup: the machine's helper is running its image's script, to v${v}`);
+      uplink?.infoChanged();
+      return { started: true, v };
+    }
+    if (!fake && process.platform !== "linux") return no(409, "An image's script runs on a Linux machine in a cloud sandbox.");
+    if (cloudSetup()?.state === "running") return no(409, "It's being updated already.");
+    const file = path.join(CLI_HOME, "cloud-setup.sh");
+    try {
+      fs.mkdirSync(CLI_HOME, { recursive: true });
+      fs.writeFileSync(file, String(script), { mode: 0o700 });
+      fs.writeFileSync(SETUP_MARK, JSON.stringify({ v: Number(v) || 0, started: Date.now() }));
+      const child = spawn(fake || "bash", [file], { detached: true, stdio: "ignore", env: cleanEnv() });
+      child.on("error", (e) => log(`cloud setup: couldn't run its script: ${e.message}`));
+      child.on("exit", () => uplink?.infoChanged());
+      child.unref();
+    } catch (e) {
+      fs.rmSync(SETUP_MARK, { force: true });
+      return no(500, `Couldn't start its script: ${e.message}`);
+    }
+    log(`cloud setup: running its image's script, to v${v}`);
+    uplink?.infoChanged();
+    return { started: true, v };
+  };
+  // A shared machine (seats.mjs): its owner adds someone to it or takes them off from agentbook's page, and a member's
+  // login reaches their seat. Both go to the machine's root helper through its spool, which this seat can write only
+  // when it's the owner's (seat-helper.mjs); the helper checks an add is signed by the owner's passkey itself.
+  const seatAsk = async (req) => {
+    if (!SEAT || !sharesHere(SEAT.name)) return no(409, "This machine isn't shared from here. On it, as root: agentbook-cli seat share <its owner's seat>.");
+    const r = await askHelper(req);
+    return r.error ? no(409, r.error) : r;
+  };
+  // A person's own secrets on their seat: names and values they typed on agentbook's page and signed. Kept in their
+  // home, which only they read, and given to what their agentbook-cli starts from then on (its own environment, which
+  // sessions and terminals inherit). Never sent up: the page hears their names only. Not names that would change what
+  // runs (PATH, a loader's, agentbook's own).
+  const SECRETS_FILE = path.join(CLI_HOME, "secrets.json");
+  const UNSAFE_NAME = /^(PATH|HOME|SHELL|USER|LOGNAME|IFS|ENV|BASH_ENV|NODE_OPTIONS|NODE_PATH|PYTHONPATH|LD_.*|DYLD_.*|AGENTBOOK_.*|GIT_.*|SSH_.*)$/;
+  commands["seat.secret"] = async ({ name, value }) => {
+    if (!SEAT) return no(409, "Secrets are kept this way on a seat of a shared machine.");
+    name = str(name, 128);
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || UNSAFE_NAME.test(name)) return no(400, `${name || "That"} can't be a secret's name here: it would change what runs, or isn't a name.`);
+    const all = seatSecrets();
+    if (typeof value === "string" && value) all[name] = value;
+    else delete all[name];
+    try {
+      fs.mkdirSync(CLI_HOME, { recursive: true });
+      fs.writeFileSync(`${SECRETS_FILE}.tmp`, JSON.stringify(all), { mode: 0o600 });
+      fs.renameSync(`${SECRETS_FILE}.tmp`, SECRETS_FILE);
+    } catch (e) {
+      return no(500, `Couldn't keep it: ${e.message}`);
+    }
+    if (name in all) process.env[name] = all[name];
+    else delete process.env[name];
+    pageChanged();
+    return { secrets: Object.keys(all).sort() };
+  };
+  commands["members.change"] = ({ change }) => seatAsk({ kind: "members.change", change });
+  commands["members.enroll"] = ({ user, enroll }) => seatAsk({ kind: "members.enroll", user, enroll });
   commands["workspace.clone"] = async ({ url: asked }) => {
     const url = cloneUrl(str(asked, 1000));
     if (!url) return no(400, "That isn't a repo agentbook can clone.");
@@ -3484,9 +3850,11 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     }
     // Another branch, a new one, or a worktree: get the checkout ready first, refusing to switch a folder that
     // has uncommitted changes or another session working in it.
-    const worktree = !!b.worktree;
     const branch = str(b.branch, 200).trim();
     const base = str(b.base, 200).trim();
+    // On a shared machine the code in /work is everyone's, so a thread that wasn't told where to work gets a worktree
+    // of its own: two people's agents don't edit the same files at once.
+    const worktree = !!b.worktree || (b.worktree === undefined && !branch && !base && sharedWork(root));
     let cwd = root;
     let onBranch;
     let make;
@@ -4066,17 +4434,32 @@ export function createCli({ machine = machineName(process.env.AGENTBOOK_MACHINE 
     },
     // Its person's settings, as the server says with each poll: Private terminals.
     setPrefs(p) {
-      const next = { private_terminals: !!p?.private_terminals };
-      if (next.private_terminals === !!prefs.private_terminals) return;
+      const next = { private_terminals: !!p?.private_terminals, git_github: !!p?.git_github, cloud: !!p?.cloud };
+      const terminals = next.private_terminals !== !!prefs.private_terminals;
+      const git = next.git_github !== !!prefs.git_github;
+      // In a cloud sandbox, or not any more: it says whether it's busy from now on (info's `pace`), or stops saying.
+      const paced = next.cloud !== !!prefs.cloud;
+      // git on a cloud machine signs in to GitHub as its owner (git-credential.mjs): set up, or taken away, as the
+      // server says. Looked at once at each start too, since the plugin's folder may have moved.
+      if (git || (next.git_github && !gitHelperSet)) {
+        gitHelperSet = next.git_github;
+        gitToken = null;
+        setGitHelper(next.git_github);
+        setGhShim(next.git_github);
+      }
+      if (!terminals && !git && !paced) return;
       prefs = next;
-      log(`private terminals: ${next.private_terminals ? "on: only threads started in agentbook are on it" : "off"}`);
-      // Turned off: what was kept off gets its thread at its next hook.
-      if (!next.private_terminals) keptOff.clear();
+      if (paced) uplink?.infoChanged();
+      if (terminals) {
+        log(`private terminals: ${next.private_terminals ? "on: only threads started in agentbook are on it" : "off"}`);
+        // Turned off: what was kept off gets its thread at its next hook.
+        if (!next.private_terminals) keptOff.clear();
+      }
       try {
         fs.mkdirSync(CLI_HOME, { recursive: true });
         fs.writeFileSync(PREFS_FILE, JSON.stringify(next));
       } catch (e) {
-        log(`private terminals: couldn't keep the setting: ${e.message}`);
+        log(`settings: couldn't keep them: ${e.message}`);
       }
     },
     gate,

@@ -134,7 +134,7 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
   const LOG = path.join(home, "events.jsonl"); // before the database: imported once, then kept as a backup
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(filesDir, { recursive: true });
-  const state = { seq: 0, agents: {}, sessions: {}, procs: {}, launches: {}, questions: [], todos: [], files: [], messages: [], outbox: [], workspaces: {}, tasks: {}, pages: {}, page_versions: [], routines: {}, routine_code: [], routine_runs: [], groups: {}, group_notes: [], group_files: [], group_events: [], group_posts: {}, notes: {}, note_versions: [], thread_guests: {}, thread_seen: {}, talks: {}, wip_sets: {}, page_posts: {}, agent_follows: {}, person_follows: {} };
+  const state = { seq: 0, agents: {}, sessions: {}, procs: {}, launches: {}, questions: [], todos: [], files: [], messages: [], outbox: [], workspaces: {}, tasks: {}, pages: {}, page_versions: [], routines: {}, routine_code: [], routine_runs: [], groups: {}, group_notes: [], group_files: [], group_events: [], group_posts: {}, notes: {}, note_versions: [], thread_guests: {}, thread_seen: {}, talks: {}, wip_sets: {}, page_posts: {}, agent_follows: {}, person_follows: {}, feed_archived: {}, machine_cloud: {}, images: {}, image_builds: {}, boxes: {} };
   const listeners = new Set();
 
   // Memory holds each thread's history (its questions, files and messages) whole or not at all. Past
@@ -342,7 +342,8 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
           const lines = post.updates.filter((u) => u[k]);
           for (const u of lines.slice(0, Math.max(0, lines.length - n + 1))) post.updates.splice(post.updates.indexOf(u), 1);
         }
-        post.updates.push({ at: now, text: op.text, link: op.link || null, ...(op.changes ? { changes: op.changes } : {}), ...(op.pr ? { pr: op.pr } : {}) });
+        // `notify`: its agent put this one on its person's bell too (ab_update's notify, once a turn; server/news.mjs).
+        post.updates.push({ at: now, text: op.text, link: op.link || null, ...(op.changes ? { changes: op.changes } : {}), ...(op.pr ? { pr: op.pr } : {}), ...(op.notify === true ? { notify: true } : {}) });
         if (post.updates.length > LIMITS.updates) post.updates.splice(0, post.updates.length - LIMITS.updates);
         touch(post, now);
         break;
@@ -425,6 +426,14 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         }
         break;
       }
+      case "agent.profile": {
+        const a = state.agents[op.agent];
+        if (a) {
+          if (typeof op.bio === "string") a.bio = op.bio;
+          if (op.avatar !== undefined) a.avatar = op.avatar;
+        }
+        break;
+      }
       case "agent.avatar": {
         // The avatar you set for an agent (null: back to its own), or with `default`, the one its runtime gives it.
         const a = state.agents[op.agent];
@@ -485,10 +494,17 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         break;
       }
       case "session.from": {
-        // The thread it was started from (a Claude Desktop session another one started, cli/desktop.mjs). Not news
-        // of its own: it keeps its place in the lists.
-        if (!post || !op.started_from || op.started_from === post.id) break;
-        post.started_from = op.started_from;
+        // The thread it was started from: a Claude Desktop session another one started (cli/desktop.mjs), or the one
+        // its person picked on its page (`by: "you"`, on the server), which may be none. What they picked stays:
+        // Desktop's doesn't replace it, nor bring back one they took off. Not news of its own: it keeps its place in
+        // the lists.
+        if (!post || op.started_from === post.id) break;
+        const picked = op.by === "you";
+        if (!picked && (!op.started_from || post.from_by === "you")) break;
+        if ((post.started_from || null) === (op.started_from || null) && (!picked || post.from_by === "you")) break;
+        if (op.started_from) post.started_from = op.started_from;
+        else delete post.started_from;
+        if (picked) post.from_by = "you";
         post.rev = (post.rev || 0) + 1;
         break;
       }
@@ -577,8 +593,8 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         // one to make, which its agent is told too. `cwd`: where it started, when that isn't `root` (a worktree);
         // with `model` and `effort`, what starting it again needs. `routine`: the routine it's a run of
         // ({ id, name }, routines.mjs). `user`: who started it, when that isn't the machine's owner: someone its owner lets
-        // operate the agent.
-        state.launches[op.lid] = { id: op.lid, agent: op.agent, root: op.root, cwd: op.cwd || null, branch: op.branch || null, prompt: op.prompt, files: op.files || [], at: now, post: op.post || null, resume: !!op.resume, named: !!op.named, teleport: op.teleport || null, mirrored: !!op.teleport, visibility: op.visibility || null, cloning: op.cloning || null, step: op.step || null, task: op.task || null, page: op.page || null, group: op.group || null, model: op.model || null, effort: op.effort || null, routine: op.routine || null, ...(op.noted ? { noted: true } : {}), ...(op.user ? { user: op.user } : {}), error: null };
+        // operate the agent. `side_of`: a side thread's, the thread whose conversation it goes on from (claude --fork-session).
+        state.launches[op.lid] = { id: op.lid, agent: op.agent, root: op.root, cwd: op.cwd || null, branch: op.branch || null, prompt: op.prompt, files: op.files || [], at: now, post: op.post || null, resume: !!op.resume, named: !!op.named, teleport: op.teleport || null, mirrored: !!op.teleport, visibility: op.visibility || null, cloning: op.cloning || null, step: op.step || null, task: op.task || null, page: op.page || null, group: op.group || null, model: op.model || null, effort: op.effort || null, routine: op.routine || null, ...(op.noted ? { noted: true } : {}), ...(op.user ? { user: op.user } : {}), ...(op.side_of ? { side_of: op.side_of } : {}), error: null };
         break;
       }
       case "launch.cloned": {
@@ -684,7 +700,8 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
       case "file.add": {
         // `remote`: where a driver fetches it from when it's first opened (a picture in an OpenClaw message).
         // `blob`: its bytes on the server (sha256); `ref`: the upload it came from there, for one you sent.
-        const f = { id: op.fid || id("f"), post: op.post || null, from: op.from, name: op.name, title: op.title || op.name, size: op.size, stored: op.stored, draft: !!op.draft, embedded: !!op.embedded, pending: !!op.pending, at: now, ...(op.remote ? { remote: op.remote } : {}), ...(op.blob ? { blob: op.blob } : {}), ...(op.ref ? { ref: op.ref } : {}), ...(op.type ? { type: op.type } : {}) };
+        // `artifact`: the claude.ai artifact it's a copy of (ab_artifact), by its link.
+        const f = { id: op.fid || id("f"), post: op.post || null, from: op.from, name: op.name, title: op.title || op.name, size: op.size, stored: op.stored, draft: !!op.draft, embedded: !!op.embedded, pending: !!op.pending, at: now, ...(op.remote ? { remote: op.remote } : {}), ...(op.blob ? { blob: op.blob } : {}), ...(op.ref ? { ref: op.ref } : {}), ...(op.type ? { type: op.type } : {}), ...(op.artifact ? { artifact: op.artifact } : {}) };
         state.files.unshift(f);
         if (op.from === "human" && post && !op.silent && !op.pending) deliver({ type: "file", file_id: f.id, name: f.name, size: f.size, path: path.join(filesDir, f.stored) });
         if (post) touch(post, now);
@@ -753,13 +770,15 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         // ends the turn: its first message after them (its closing words, or what it said with ab_reply).
         const shape = op.from === "agent" && post.shape && !op.command && !op.file_id ? post.shape : null;
         if (shape) delete post.shape;
+        // `via: "side"`: what you sent on the side, which started a side thread (`launch`, its launch) and never reached
+        // this thread's session.
         // `user`: who sent it, when it isn't the machine's owner: someone its owner lets operate its agent,
         // or the one who started it from the page (a launch's `user`).
         const user = op.from === "human" ? op.user || (launched && !launched.resume ? launched.user : null) || null : null;
         // `intro`: who it's from, as its machine tells its agent before their words (an operator's): kept here, so a
         // message sent again says it again; never sent to the server.
         const intro = user && op.from === "human" && typeof op.intro === "string" && !op.command ? op.intro : null;
-        state.messages.push({ id: mid, post: op.post, from: op.from, via, text, file_id: op.file_id || null, files: files.map((f) => ({ id: f.id, name: f.name, size: f.size })), at: op.when || now, ...(user ? { user } : {}), ...(intro ? { intro } : {}), ...(op.ext ? { ext: op.ext } : {}), ...(op.routine ? { routine: op.routine } : {}), ...(queue ? { queued: true } : {}), ...(op.command ? { command: op.command } : {}), ...(shape ? { shape } : {}) });
+        state.messages.push({ id: mid, post: op.post, from: op.from, via, text, file_id: op.file_id || null, files: files.map((f) => ({ id: f.id, name: f.name, size: f.size })), at: op.when || now, ...(user ? { user } : {}), ...(intro ? { intro } : {}), ...(op.ext ? { ext: op.ext } : {}), ...(op.routine ? { routine: op.routine } : {}), ...(queue ? { queued: true } : {}), ...(op.command ? { command: op.command } : {}), ...(shape ? { shape } : {}), ...(op.via === "side" && op.launch ? { launch: op.launch } : {}) });
         // A slash command isn't what the thread is about, so it never becomes its prompt ("You asked: /status").
         if (op.from === "human" && !post.prompt && text && !op.routine && !op.command) post.prompt = text;
         // A cron job's run with something to report moves its thread on the feed, as a change moves a page (feed.mjs).
@@ -1181,12 +1200,23 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         break;
       }
       case "bell.dismiss": {
-        // A failed routine a person took off Needs you (server only): `key` says which routine, `failed` when the run
-        // they dismissed failed, so a later failure is news again. Their newest 200.
+        // A line a person took off the bell (server only): `key` says which (a failed routine, a question, a thread
+        // that ended asking, news), `failed` when what they dismissed happened, so a later one is on it again. Their
+        // newest 200.
         if (!op.user || !op.key) break;
         const mine = ((state.bell_dismissed ||= {})[op.user] ||= {});
         delete mine[op.key];
         mine[op.key] = op.failed || "";
+        for (const k of Object.keys(mine).slice(0, -200)) delete mine[k];
+        break;
+      }
+      case "feed.archive": {
+        // A page's update a person archived off their feed (server only): `moved` is when the page last moved up the
+        // feed, so its next change is news again and shows. `on: false` brings it back. Their newest 200.
+        if (!op.user || !op.page) break;
+        const mine = ((state.feed_archived ||= {})[op.user] ||= {});
+        delete mine[op.page];
+        if (op.on !== false) mine[op.page] = op.moved || "";
         for (const k of Object.keys(mine).slice(0, -200)) delete mine[k];
         break;
       }
@@ -1212,12 +1242,103 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
         }
         break;
       }
+      case "machine.cloud": {
+        // The cloud sandbox a machine runs in (server only): which boat connector of its
+        // owner's wakes it, and which sandbox. None: unlinked.
+        if (!op.device) break;
+        const all = (state.machine_cloud ||= {});
+        // `github`: whether git on it signs in to GitHub as its owner, with their GitHub connector (on unless turned off).
+        // `made`: agentbook made the sandbox, from an image of its owner's (`image`, at version `v`; `size`), with a
+        // boat environment for its secrets (`env`, boat's id for it; `secrets`, their names, never their values).
+        const made = op.made ? { made: true, image: op.image || null, v: op.v ?? null, size: op.size || null, env: op.env || null, env_name: op.env_name || null, secrets: Array.isArray(op.secrets) ? op.secrets.map(String) : [], ...(op.setting ? { setting: true } : {}) } : {};
+        if (op.sandbox && op.connector) all[op.device] = { connector: String(op.connector), sandbox: String(op.sandbox), at: now, ...(op.github === false ? { github: false } : {}), ...made };
+        else if (typeof op.github === "boolean" && all[op.device]) all[op.device] = { ...all[op.device], github: op.github };
+        // What changed on one agentbook made: its image's version after an Update, its secrets' names, its setup done.
+        else if (op.patch && all[op.device]) {
+          const next = { ...all[op.device] };
+          for (const k of ["v", "image", "secrets", "setting", "setup_error", "updating", "gone"]) if (k in op.patch) next[k] = op.patch[k];
+          for (const k of ["setting", "setup_error", "updating", "gone"]) if (next[k] == null || next[k] === false) delete next[k];
+          all[op.device] = next;
+        } else delete all[op.device];
+        break;
+      }
+      case "box.member": {
+        // Who's on a shared machine (server only). `box`: the machine
+        // that's shared, its owner's (`owner`, an account id). `member`: an account id, `user` their username, with
+        // `state`: "invited" (the owner added them, and their seat is made there once `seated`), then "joined" (they
+        // logged their seat in: `device`, their own machine for it). `remove`: they left, or were taken off.
+        if (!op.box || !op.member) break;
+        const all = (state.boxes ||= {});
+        const b = (all[op.box] ||= { id: op.box, owner: op.owner || null, members: {} });
+        if (op.remove) {
+          delete b.members[op.member];
+          if (!Object.keys(b.members).length) delete all[op.box];
+          break;
+        }
+        const was = b.members[op.member];
+        b.members[op.member] = { user: String(op.user || was?.user || ""), state: op.state === "joined" ? "joined" : "invited", seated: op.seated ?? was?.seated ?? false, device: op.device ?? was?.device ?? null, at: was?.at || now, ...(op.state === "joined" ? { joined: was?.joined || now } : {}) };
+        break;
+      }
+      case "box.remove": {
+        // The machine is no longer shared (it was deleted or disconnected): nobody's on it.
+        if (op.box && state.boxes) delete state.boxes[op.box];
+        break;
+      }
+      case "image.save": {
+        // An image (server only): what a cloud machine of its owner's starts with, as a
+        // draft they edit. `def`: its picks, repos, steps and settings, with secrets as names only. Building it makes
+        // a version (image.build).
+        if (!op.image || !op.owner) break;
+        const all = (state.images ||= {});
+        const was = all[op.image];
+        if (was && was.owner !== op.owner) break;
+        all[op.image] = { id: op.image, owner: op.owner, connector: op.connector || was?.connector || null, name: String(op.name || was?.name || op.image).slice(0, 60), def: op.def || was?.def || {}, v: was?.v || 0, created: was?.created || now, updated: now };
+        break;
+      }
+      case "image.remove": {
+        if (!op.image || !state.images?.[op.image]) break;
+        delete state.images[op.image];
+        for (const [id, b] of Object.entries(state.image_builds || {})) if (b.image === op.image) delete state.image_builds[id];
+        break;
+      }
+      case "image.build": {
+        // A build: one version of an image being made into a disk (a boat saved snapshot), on a builder sandbox.
+        // It keeps the definition it was built from, and what the builder said.
+        const img = state.images?.[op.image];
+        if (!op.build || !img) break;
+        (state.image_builds ||= {})[op.build] = { id: op.build, image: op.image, v: op.v, owner: img.owner, connector: op.connector || img.connector, def: op.def || img.def, cli: op.cli || null, snapshot: op.snapshot || null, sandbox: op.sandbox || null, state: "building", started: now, ended: null, error: null, log: "" };
+        img.v = Math.max(img.v || 0, op.v || 0);
+        break;
+      }
+      case "image.built": {
+        // How a build is going, or ended: `patch` over its record (state: building, saving, ready, failed, gone).
+        const b = state.image_builds?.[op.build];
+        if (!b || !op.patch) break;
+        for (const k of ["state", "sandbox", "error", "log", "ended", "step"]) if (k in op.patch) b[k] = op.patch[k];
+        if (["ready", "failed"].includes(op.patch.state) && !b.ended) b.ended = now;
+        break;
+      }
       case "auto.archived": {
         // Threads Auto-archive archived once their work merged or landed (server only), each once: one brought back
         // stays. `skipped`: the ones done already when it was turned on, which it leaves as they are.
         if (!op.user || !Array.isArray(op.posts)) break;
         const all = (state.auto_archived ||= {});
         for (const x of op.posts) if (x?.post && !all[x.post]) all[x.post] = { user: op.user, at: now, why: x.why || null, title: x.title || null, ...(op.skipped ? { skipped: true } : {}) };
+        break;
+      }
+      case "news.add": {
+        // News for a person's bell (server only, server/news.mjs): what a thread of theirs did that's worth hearing
+        // about, { kind: "turn" | "pr" | "flag", post, text, … }. `key` says what it's about: said once, however many
+        // threads say it (a pull request's line again an hour later is news again: its checks failed a second time).
+        // Their newest 50.
+        if (!op.user || !Array.isArray(op.items)) break;
+        const list = ((state.news ||= {})[op.user] ||= []);
+        const same = (x, y) => y.key === x.key && (x.kind !== "pr" || Date.parse(now) - Date.parse(y.at) < 3600e3);
+        for (const x of op.items) {
+          if (!x?.post || !["turn", "pr", "flag"].includes(x.kind) || (x.key && list.some((y) => same(x, y)))) continue;
+          list.push({ ...x, text: String(x.text || ""), at: now });
+        }
+        list.splice(0, Math.max(0, list.length - 50));
         break;
       }
       case "private.off": {
@@ -1259,6 +1380,9 @@ export function createStore({ file = DB_FILE, filesDir = FILES_DIR, outbox = tru
   function adopt(l, key, op) {
     Object.assign(l, { post: key, arrived: true });
     if (state.sessions[key]) state.sessions[key].launch = l.id;
+    // A side thread: started from the thread it forked, and its own from when it was made (its transcript has that
+    // thread's conversation before it: transcript.mjs).
+    if (l.side_of && state.sessions[key] && l.side_of !== key) Object.assign(state.sessions[key], { started_from: l.side_of, side_at: l.at });
     // Posted as private or public, unlike its agent: the post keeps that.
     if (l.visibility && state.sessions[key] && state.sessions[key].visibility == null) state.sessions[key].visibility = l.visibility;
     for (const f of state.files) if (l.files?.includes(f.id)) Object.assign(f, { post: key, pending: false });
@@ -1480,9 +1604,10 @@ const stopLine = (f) => (f.text || "An API error ended its turn").split(/(?<=\.)
 const ASKING = new Set(["needs_you", "blocked"]);
 // What a thread's last turn ended asking of you, from its latest messages (`said`, none of them queued): its verdict
 // ({ kind, line }) when the last thing said is the agent's reply that ended a turn on one of those, else null. You
-// writing to it (a routine's run too) comes after it; answering what it asked wakes it, and then it's working.
+// writing to it (a routine's run too) comes after it; answering what it asked wakes it, and then it's working. What you
+// sent on the side (via "side") went to a side thread, not to it: it's still asking.
 export function endedAsking(said) {
-  const m = said?.at(-1);
+  const m = said?.filter((x) => x.via !== "side").at(-1);
   const v = m?.from === "agent" ? m.shape?.verdict : null;
   return v && ASKING.has(v.kind) ? { kind: v.kind, line: String(v.line || ""), at: m.at } : null;
 }

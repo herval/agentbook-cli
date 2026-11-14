@@ -51,7 +51,7 @@ const OPERATOR_START = new Set(["lid", "agent", "prompt", "root", "files", "mode
 const switchOf = (kind) => (kind in DEFAULTS.commands ? kind : kind.startsWith("read.") ? "read" : kind.startsWith("page_routine.") || kind.startsWith("routine.") ? "routine" : kind.split(".")[0]);
 // What starts a post: limited an hour, and one sent twice in a row starts once. (Anything else may well be meant
 // twice: the same message, Stop pressed again.)
-const STARTS = new Set(["post.start", "cloud.pull"]);
+const STARTS = new Set(["post.start", "post.side", "cloud.pull"]);
 const REPEAT_MS = 10e3;
 
 const tilde = (p) => String(p || "").replace(/^~(?=\/|$)/, os.homedir());
@@ -118,6 +118,8 @@ export function createGate({ home, roots = () => [], readRoots = roots, postOf =
     s.operators = s.operators.filter(isOperator);
     if (!s.operators_seen || typeof s.operators_seen !== "object" || Array.isArray(s.operators_seen)) s.operators_seen = {};
     if (!Array.isArray(s.signed)) s.signed = SIGNED_KINDS;
+    // A side thread tells an agent something as its owner, as a message does: a list saved before it signs it alike.
+    if (s.signed.includes("post.deliver") && !s.signed.includes("post.side")) s.signed = [...s.signed, "post.side"];
     // A browser's key its passkey signed signs for at most this long here, and never past the code's own longest.
     s.session_hours = Number.isFinite(s.session_hours) ? Math.max(0, Math.min(SESSION_HOURS, s.session_hours)) : SESSION_HOURS;
     s.keys = s.keys.filter(isKey);

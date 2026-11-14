@@ -27,6 +27,14 @@ export const GROUP_MENTION = /(^|[\s(])@group:([a-z0-9][a-z0-9-]*)(?![\w/-])/g;
 // "@note:<id>", one of your notes (noteId(): [a-z0-9-]).
 export const NOTE_MENTION = /(^|[\s(])@note:([a-z0-9][a-z0-9-]*)(?![\w/-])/g;
 
+// A claude.ai artifact's link: claude.ai/artifact/<id> or claude.ai/code/artifact/<uuid>. claude.ai won't be framed
+// by another site, so a thread shows one as a copy its agent hands over (ab_artifact, plugin/cli/artifact.mjs).
+export const ARTIFACT_URL = /https:\/\/(?:preview\.)?claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9][A-Za-z0-9_-]{5,200}/g;
+// The artifact links in a message, once each, in order.
+export const artifactLinks = (text) => [...new Set(String(text || "").match(ARTIFACT_URL) || [])];
+// What its agent is told about each (mentionNote).
+const ARTIFACT_NOTE = "a claude.ai artifact, which agentbook can't show from its link. If you have Claude Code's Artifact tool, put a copy on this thread with ab_artifact";
+
 const widgetOf = (p, id) => (p?.widgets || []).find((w) => w.id === id) || null;
 
 // Short tokens naming a widget on `page` (the page the message is about, or null), written out in full. A short
@@ -112,13 +120,15 @@ function taskIs(t) {
 
 // The note an agent gets after a message that names pages, widgets, workspaces, tasks or groups: what each is, what
 // a widget showed when the message was sent (a routine may refresh it before the agent looks), where a workspace is,
-// and the task or the group its thread is now on or in. "" when it names none. `workspaces`, `tasks`, `groups`: the
+// and the task or the group its thread is now on or in; and a line for each claude.ai artifact it links to. "" when
+// it names none. `workspaces`, `tasks`, `groups`: the
 // sender's, by id, each workspace with its `checkouts`; a task or a group with `here` is one the thread is on or in.
 // `notes`: the notes the sender sees, by id, each with `whose` when it's someone else's.
 export function mentionNote(text, pages, now = Date.now(), workspaces = {}, { tasks = {}, groups = {}, notes = {} } = {}) {
   const at = new Map([...String(text || "").matchAll(MENTION)].map((m) => [m[3] ? `${m[2]}/${m[3]}` : m[2], m.index]).reverse());
   const named = [...mentionsIn(text, pages).map((x) => ({ ...x, at: at.get(x.ref) })), ...workspacesIn(text, workspaces), ...tasksIn(text, tasks), ...groupsIn(text, groups), ...notesIn(text, notes)].sort((a, b) => a.at - b.at);
-  if (!named.length) return "";
+  const artifacts = artifactLinks(text).map((url) => `- ${url}: ${ARTIFACT_NOTE}`);
+  if (!named.length && !artifacts.length) return "";
   const lines = named.map(({ ref, page: p, widget: w, workspace: ws, task: t, group: g, note }) => {
     if (note) return `- @${ref}: the note "${note.title}"${note.whose ? `, ${note.whose}'s` : ""} on agentbook (ab_note_read with note "${note.id}" reads it)`;
     if (ws) return `- @${ref}: the workspace "${ws.name}", ${whereIs(ws)}`;
@@ -131,5 +141,5 @@ export function mentionNote(text, pages, now = Date.now(), workspaces = {}, { ta
     const n = (p.widgets || []).length;
     return `- @${ref}: the page "${p.title}", ${plural(n, "widget")} (v${p.version}${p.updated ? `, changed ${ago(p.updated, now)}` : ""})${p.archived ? ", archived" : ""}`;
   });
-  return `Named:\n${lines.join("\n")}`;
+  return `Named:\n${[...lines, ...artifacts].join("\n")}`;
 }

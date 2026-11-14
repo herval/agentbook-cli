@@ -7,6 +7,7 @@
 // - list:   claude agents --json --all                → id, sessionId, kind, state, status, pid…
 // - stop:   claude stop <id>                          ends its process (it sleeps); its conversation is kept
 // - interrupt: claude attach <id>, then Esc           cancels its turn, as Esc does in its terminal
+// - side:   claude "<message>" --resume <session> --fork-session --bg  a new session with its conversation so far
 // - wake:   claude "<message>" --resume <session> --bg  continues a stopped session under the same id,
 //           with the message as its next prompt. A session that's still running would be copied instead,
 //           so an idle one is stopped first. A session keeps the options it started with, so passing them
@@ -34,9 +35,27 @@ import { isPluginDir, pluginCopy } from "../plugin-copy.mjs";
 import { cleanEnv as cleanEnvOf } from "../../lib/common.mjs";
 
 const claudeBin = () => process.env.AGENTBOOK_CLAUDE || "claude";
-// Node says ENOENT both when there's no `claude` and when the folder it's run in is gone (a worktree removed
-// since the thread started), so look before blaming the install.
-export const goneOrMissing = (cwd, missing) => (cwd && !fs.existsSync(cwd) ? new Error(`Its folder is gone (${cwd}).`) : new Error(missing));
+// Node says ENOENT both when there's no `claude` and when the folder it's run in is gone (a worktree removed since the
+// thread started), and EACCES both for a `claude` it can't run and a folder it can't open (another person's, on a shared
+// machine, where agentbook-cli runs as each person). So the folder is looked at before the install is blamed.
+const whoAmI = () => {
+  try {
+    return os.userInfo().username;
+  } catch {
+    return `uid ${process.getuid?.()}`;
+  }
+};
+export function folderTrouble(cwd) {
+  if (!cwd) return null;
+  try {
+    fs.accessSync(cwd, fs.constants.X_OK);
+    return null;
+  } catch (e) {
+    if (e.code === "ENOENT" || e.code === "ENOTDIR") return new Error(`Its folder is gone (${cwd}).`);
+    return new Error(`agentbook-cli here runs as ${whoAmI()}, who can't open its folder (${cwd}).`);
+  }
+}
+export const goneOrMissing = (cwd, missing) => folderTrouble(cwd) || new Error(missing);
 const configDir = () => process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
 
 // What you can pick: Claude Code's aliases for the latest of each model. `default` is your settings' model.
@@ -174,7 +193,7 @@ function askCommands({ cwd, dirs = [] }) {
     });
     child.stderr.on("data", (d) => (err = (err + d).slice(-4000)));
     child.stdin.on("error", () => {});
-    child.on("error", (e) => finish(e.code === "ENOENT" ? goneOrMissing(cwd, "Claude Code isn't installed here (no `claude` command).") : e));
+    child.on("error", (e) => finish(e.code === "ENOENT" ? goneOrMissing(cwd, "Claude Code isn't installed here (no `claude` command).") : e.code === "EACCES" ? goneOrMissing(cwd, `Claude Code can't be run here: ${e.message}`) : e));
     child.on("exit", () => finish(new Error(reason(err) || "Claude Code ended before listing its commands.")));
     child.stdin.write(JSON.stringify({ type: "control_request", request_id: "agentbook-commands", request: { subtype: "initialize" } }) + "\n");
   });
@@ -272,6 +291,7 @@ function run(args, { cwd, env, timeout = 30000 } = {}) {
       const out = plain(`${stdout}\n${stderr}`);
       if (err) {
         if (err.code === "ENOENT") return reject(goneOrMissing(cwd, "Claude Code isn't installed here (no `claude` command)."));
+        if (err.code === "EACCES") return reject(goneOrMissing(cwd, `Claude Code can't be run here: ${err.message}`));
         return reject(new Error(reason(out) || err.message));
       }
       resolve(out);
@@ -508,6 +528,25 @@ export function createClaude({ log = () => {} } = {}) {
     return { id: a.id, sessionId: a.sessionId || null, detail: String(saved?.detail || saved?.text || ""), at: Date.parse(saved?.updatedAt) || a.startedAt || 0 };
   }
 
+  // A side thread: a new background session with the conversation of `sessionId` so far and `prompt` as its next
+  // message (`--resume … --fork-session`). Claude Code copies the conversation into the new session's transcript as
+  // it was, ids and times kept, then writes the prompt; the session it came from goes on as it was, running or not.
+  // It works in the same folder, on the model and effort the other was saved with when it runs in the background.
+  async function fork({ sessionId, cwd, prompt, lid, dirs = [] }) {
+    if (!cwd || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw folderTrouble(cwd) || new Error(`No folder at ${cwd}`);
+    const a = info(sessionId);
+    const saved = a?.kind === "background" ? savedState(a.id)?.respawnFlags : null;
+    const keep = (name) => {
+      const i = Array.isArray(saved) ? saved.lastIndexOf(name) : -1;
+      return i >= 0 && saved[i + 1] ? [name, String(saved[i + 1])] : [];
+    };
+    const env = cleanEnv({ AGENTBOOK_LAUNCH_ID: lid });
+    const flags = [...IN_PLACE, ...keep("--model"), ...keep("--effort"), ...dirArgs(dirs)];
+    const r = backgrounded(await run([asArg(prompt), "--resume", sessionId, "--fork-session", "--bg", ...pluginArgs(), ...flags, ...toolArgs()], { cwd, env }));
+    refresh();
+    return r;
+  }
+
   // The background session Claude Code started in `cwd` with `prompt` since `since` (ms), by what it saved of it: its
   // id, or null. For a start whose answer was lost (agentbook-cli stopped while `claude --bg` ran).
   function startedWith({ prompt, cwd, since }) {
@@ -533,7 +572,7 @@ export function createClaude({ log = () => {} } = {}) {
     }
     return null;
   }
-  return { refresh, info, background, running, start, stop, interrupt, backgroundWork, workOf, resume, failure, blocked, startedWith, listedAt: () => listed, listAsked: () => listAsked, version: () => version };
+  return { refresh, info, background, running, start, stop, interrupt, backgroundWork, workOf, resume, fork, failure, blocked, startedWith, listedAt: () => listed, listAsked: () => listAsked, version: () => version };
 }
 
 // Open a terminal window running `cmd` in `cwd`. Only macOS's Terminal for now; elsewhere the page offers

@@ -5,7 +5,7 @@
 // routine's OK, a change of keys (plugin/shared/signed.mjs).
 
 import crypto from "node:crypto";
-import { canonical, digestOf, envelope, fingerprint, isKey, routineRunnable } from "../shared/signed.mjs";
+import { assertionRefusal, canonical, digestOf, envelope, fingerprint, isKey, routineRunnable } from "../shared/signed.mjs";
 import { COMMANDS } from "../shared/protocol.mjs";
 
 const b64 = (s) => Buffer.from(String(s || ""), "base64url");
@@ -16,40 +16,6 @@ const SKEW = 5 * 60e3;
 const LONGEST = 7 * 86400e3;
 // A page passkeys may sign on: https anywhere, or http on this machine (a server you run here, at localhost).
 const pageOk = (o) => typeof o === "string" && /^(https:\/\/[^/\s]+|http:\/\/localhost(:\d+)?)$/.test(o);
-
-// Why a passkey's signature over `payload` doesn't hold, or null when it does: by one of `keys`, on `origin`, for
-// `rpId`, with its person verified.
-export function assertionRefusal(payload, sig, { keys = [], origin, rpId } = {}) {
-  if (!sig || typeof sig !== "object") return "it isn't signed by its owner's passkey";
-  const key = keys.find((k) => k.id === sig.key);
-  if (!key) return "it's signed with a key this machine doesn't keep";
-  let client;
-  try {
-    client = JSON.parse(b64(sig.clientDataJSON).toString("utf8"));
-  } catch {
-    return "its signature is malformed";
-  }
-  if (client?.type !== "webauthn.get") return "its signature is malformed";
-  if (client.origin !== origin) return `it was signed on ${String(client.origin).slice(0, 120)}, not on ${origin}`;
-  if (client.challenge !== digestOf(payload)) return "its signature is for something else";
-  const auth = b64(sig.authenticatorData);
-  if (auth.length < 37 || !auth.subarray(0, 32).equals(sha256(Buffer.from(String(rpId || ""))))) return "its signature is for another site";
-  // User present, and verified: a face, a finger or a PIN, not just a tap.
-  if (!(auth[32] & 0x01) || !(auth[32] & 0x04)) return "it was signed without checking it was you";
-  const data = Buffer.concat([auth, sha256(b64(sig.clientDataJSON))]);
-  let good = false;
-  try {
-    const pub = crypto.createPublicKey({ key: b64(key.spki), format: "der", type: "spki" });
-    const s = b64(sig.signature);
-    if (key.alg === -7) good = crypto.verify("sha256", data, { key: pub, dsaEncoding: "der" }, s);
-    else if (key.alg === -8) good = crypto.verify(null, data, pub, s);
-    else if (key.alg === -257) good = crypto.verify("sha256", data, { key: pub, padding: crypto.constants.RSA_PKCS1_PADDING }, s);
-    else return "it's signed with a kind of key agentbook-cli doesn't check";
-  } catch {
-    good = false;
-  }
-  return good ? null : "its signature doesn't match";
-}
 
 // The longest a browser's key signs for its owner here, in hours, unless gate.json's `session_hours` says less (0:
 // only the passkey itself, every time).
@@ -168,4 +134,4 @@ export function operatorsRefusal(change, { keys = [], origin, rpId, machine, see
   return assertionRefusal(e, change.sig, { keys, origin, rpId });
 }
 
-export { canonical, fingerprint, isKey };
+export { assertionRefusal, canonical, fingerprint, isKey };

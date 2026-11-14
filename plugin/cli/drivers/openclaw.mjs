@@ -111,12 +111,15 @@ export const withoutMedia = (text) => mediaLines(text).text;
 // all of it: another session's or a tool's result handed to the agent ("[Inter-session message]"), a
 // reminder, a command that finished, a turn a restart cut short. OpenClaw says whose a message is (`provenance`), except in a claude-cli agent's
 // history, which it reads back from Claude Code's transcript; there its words tell.
+// A command its agent left running in the background wakes the agent when it ends, with "Exec completed (<id>, code 0) ::
+// <the end of its output>" ("Exec failed (…)" and, from a node, "Exec finished (node=…)") as a message with no `provenance`:
+// OpenClaw's tools.exec.notifyOnExit, on unless turned off.
 const RESUMED = /^OpenClaw resumed this CLI session after prompt content changed\.[^\n]*\n*/;
 const NOTES = /^(System:[^\n]*(\n|$))+\s*/;
 const SKILLS = /^Use the following explicitly referenced skills for this request\.[^\n]*\n(?:[^\n]*\n)*?\nUser request:\n/;
 const CLI_IMAGES = /(\s*@\S*[\\/]\.?openclaw-cli-images[\\/]\S+)+\s*$/;
 const CUT = /^[\w:]{0,7}\n?\.\.\.\(truncated\)\.\.\.$/; // all that's left of notes OpenClaw's history cut short
-const OPENCLAWS = [/^\[System\] /, /^A scheduled (reminder has been|cron event was) triggered\./, /^An async command (you ran earlier|the user already approved|completion event was triggered|did not run)/];
+const OPENCLAWS = [/^\[System\] /, /^A scheduled (reminder has been|cron event was) triggered\./, /^An async command (you ran earlier|the user already approved|completion event was triggered|did not run)/, /^Exec (completed|failed) \([\w-]+, [^)\n]+\)( :: |\n|$)/, /^Exec (started|finished|denied) \(node=/];
 // A message with files: where each is ("[media attached: …]"), then what OpenClaw saw in them ("[Video]",
 // "Description: …"), with what you wrote as "User text:".
 const ATTACHED = /^(\[media attached[^\]\n]*\]\s*)+/;

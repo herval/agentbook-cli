@@ -61,6 +61,8 @@ export function describeTool(name, input = {}, cwd = "") {
   switch (name) {
     case "Bash":
       return input.description ? short(input.description) : `Run ${short(input.command, 70)}`;
+    case "Monitor":
+      return input.description ? `Watch ${short(input.description)}` : `Watch ${short(input.command, 70)}`;
     case "Read":
       return `Read ${short(rel(input.file_path), 70)}`;
     case "Edit":
@@ -111,7 +113,37 @@ export function describeTool(name, input = {}, cwd = "") {
 
 // Tools that show up on agentbook anyway, or say nothing about the work. Not ab_search and a read of what it found:
 // you should see when an agent went through other threads, and for what.
-const QUIET = (name) => (name.startsWith("mcp__plugin_agentbook_") && !SEEN_TOOL.test(name)) || name === "ToolSearch" || name === "TodoWrite";
+const QUIET = (name) => ((name.startsWith("mcp__plugin_agentbook_") || SHARED_CALL.test(name)) && !SEEN_TOOL.test(name)) || name === "ToolSearch" || name === "TodoWrite" || name === WRAP_UP;
+
+// Claude Desktop's next-step box: a session there ends its turn by calling Desktop's own tool with a question for
+// the person (`ask`) and the buttons under it (`actions`: [{ label }], some with an `action` of Desktop's own, as
+// create_pr), and is told to leave the question out of its closing words, since the box asks it. Only its transcript
+// has it. Kept for the turn it was made in: its question, and its buttons' labels (one without a label is a
+// feature of Desktop's, as its Auto-fix switch, and nothing to say).
+const WRAP_UP = "mcp__ccd_turn__wrap_up";
+function noteWrapUp(d, b) {
+  if (b.name !== WRAP_UP) return;
+  const text = (x, n) => (typeof x === "string" ? x.replace(/\s+/g, " ").trim().slice(0, n) : "");
+  const replies = (Array.isArray(b.input?.actions) ? b.input.actions : []).map((a) => text(a?.label, 100)).filter(Boolean);
+  const ask = text(b.input?.ask, 300);
+  d.wrap = ask || replies.length ? { turn: d.turn, ask, replies } : null;
+}
+
+// agentbook's tools called through a server that isn't the session's own: one an app runs for every session in it
+// (Claude Desktop passes the servers in its own config to its Code sessions, where the tools are
+// mcp__agentbook__ab_post beside the plugin's mcp__plugin_agentbook_agentbook__ab_post). That server can't say which
+// session called, and the session's transcript can: each such call is kept from its tool_use until its result, so
+// agentbook-cli finds who made the one it just got (caller, below). A plugin's server is its session's own.
+const SHARED_CALL = /^mcp__(?!plugin_).+__(ab_[a-z_]+)$/;
+const CALLS_KEEP = 40;
+// A call's arguments, the same text whatever order their keys came in.
+export const canon = (x) => JSON.stringify(x ?? {}, (k, v) => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map((key) => [key, v[key]])) : v));
+function noteCall(d, b, at) {
+  const name = SHARED_CALL.exec(b.name)?.[1];
+  if (!name) return;
+  (d.calls ||= new Map()).set(b.id, { name, args: canon(b.input), at });
+  if (d.calls.size > CALLS_KEEP) d.calls.delete(d.calls.keys().next().value);
+}
 
 // A prompt, typed or sent from agentbook, starts a turn, and so does one a loop fired. Tool results come back as
 // user entries too.
@@ -354,22 +386,39 @@ function workerResult(d, b, r, at) {
 // Claude Code's notices that something it left running stopped (<task-notification>), one or more in a text, after a
 // preamble of its own. It queues each when it happens, and hands it over as a message, or mid-turn; the first says when.
 function noticesIn(d, text, at) {
-  if (typeof text !== "string" || !d.workers) return;
+  if (typeof text !== "string" || !(d.workers || d.bg?.size)) return;
   for (const notice of text.match(/<task-notification>[\s\S]*?<\/task-notification>/g) || []) workerNotice(d, notice, at || new Date().toISOString());
 }
 function workerNotice(d, text, at) {
   // By the call that started it, or (from older Claude Code, whose notices don't say that) by its id for it.
   const id = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(text)?.[1];
   const task = /<task-id>([^<]+)<\/task-id>/.exec(text)?.[1];
-  const w = (id && d.workers.get(id)) || (task && [...d.workers.values()].find((x) => x.agent === task));
-  if (!w) return; // a command it left running in the background, not a subagent
-  const state = stateOf(/<status>([^<]+)<\/status>/.exec(text)?.[1]);
+  const w = (id && d.workers?.get(id)) || (task && [...(d.workers?.values() || [])].find((x) => x.agent === task));
+  const status = /<status>([^<]+)<\/status>/.exec(text)?.[1];
+  // Not a subagent: a command or a monitor it left running (noteLeft). A notice with no status is news of one that
+  // runs on (a monitor's event, a command still running after 30 minutes).
+  if (!w) return void (task && status && d.bg?.delete(task));
+  const state = stateOf(status);
   const why = /<summary>[^<]*? failed: ([^<]+)<\/summary>/.exec(text)?.[1];
   settle(w, state, at, state === "failed" && why ? short(why, 300) : null);
   // A notice comes each time it stops, so it ended at the latest: one that failed, was sent a message (SendMessage)
   // and then finished ended when it finished. That message, read from its own transcript after this notice, isn't
   // it going again (takeSub).
   if (!going(w) && at > w.ended) w.ended = at;
+}
+
+// What it left running in the background, by Claude Code's id for each: a command (a Bash result that says so) or a
+// monitor, from then until Claude Code's notice that it stopped, or the call that stopped it (TaskStop). Claude Code
+// lists these itself for a background session (its saved state); for one in a terminal, in Claude Desktop or in VS
+// Code this is all there is. A monitor that isn't persistent ends at its timeout, which leaves no notice.
+function noteLeft(d, step, r, at) {
+  if (!r || typeof r !== "object") return;
+  if (step.tool === "TaskStop" || step.tool === "KillShell") return void d.bg?.delete(String(r.task_id || r.shell_id || ""));
+  const monitor = step.tool === "Monitor";
+  const id = monitor ? r.taskId : r.backgroundTaskId;
+  if (!id) return;
+  (d.bg ||= new Map()).set(String(id), { id: String(id), kind: monitor ? "monitor" : "shell", title: step.title, started: at, until: monitor && !r.persistent && r.timeoutMs > 0 ? Date.parse(at) + r.timeoutMs : null });
+  if (d.bg.size > 200) d.bg.delete(d.bg.keys().next().value);
 }
 
 // The turn something happened in, by its time: a subagent in the background works on into later turns.
@@ -379,7 +428,14 @@ function turnAt(d, at) {
 }
 
 // Fold one transcript entry into a digest. `span`: where its line is in the transcript.
+// A side thread's transcript starts with the conversation it was made from (claude --fork-session copies it as it
+// was, ids and times kept): none of that is its own, so it's passed over up to its own first prompt, the first one
+// written since it was made (`d.since`).
 function take(d, e, cwd, span) {
+  if (d.copied) {
+    if (!isPrompt(e) || !(String(e.timestamp || "") >= d.since)) return;
+    d.copied = false;
+  }
   if (e.type === "ai-title" && e.aiTitle) return void (d.ai_title = short(e.aiTitle, 120));
   if (e.type === "pr-link" && e.prUrl) return void (d.prs[e.prUrl] = { url: e.prUrl, number: e.prNumber, repo: e.prRepository, at: d.prs[e.prUrl]?.at || e.timestamp, how: "opened" });
   if (e.type === "system" && e.subtype === "turn_duration") return void (d.worked += Number(e.durationMs) || 0);
@@ -399,6 +455,7 @@ function take(d, e, cwd, span) {
     if (isInterrupt(e)) return void (d.interrupted = at);
     if (isPrompt(e)) {
       d.interrupted = null;
+      d.calls?.clear(); // a call the last turn never got an answer to isn't one it's making now
       d.turn++;
       d.turns.push({ turn: d.turn, at });
       if (e.turnOrigin === "scheduled") noteFire(d, e, at);
@@ -413,6 +470,7 @@ function take(d, e, cwd, span) {
         if (!b.is_error) noteScheduler(d, call, e.toolUseResult, at);
       }
       workerResult(d, b, e.toolUseResult, at);
+      d.calls?.delete(b.tool_use_id);
       const step = d.byId?.get(b.tool_use_id);
       if (!step) continue;
       step.done = at;
@@ -422,6 +480,7 @@ function take(d, e, cwd, span) {
         (d.tasks ||= new Map()).set(String(task), step.title);
         if (d.tasks.size > 200) d.tasks.delete(d.tasks.keys().next().value);
       }
+      if (!b.is_error) noteLeft(d, step, e.toolUseResult, at);
       if (b.is_error) {
         const text = typeof b.content === "string" ? b.content : (b.content || []).map((x) => x.text || "").join(" ");
         step.error = short(text, 160) || "Failed";
@@ -454,6 +513,8 @@ function take(d, e, cwd, span) {
     if (SCHEDULERS.has(b.name)) (d.scheduling ||= new Map()).set(b.id, { name: b.name, input: b.input });
     noteCommand(d, b, at);
     noteRead(d, b);
+    noteCall(d, b, at);
+    noteWrapUp(d, b);
     if (QUIET(b.name)) continue;
     const step = { id: b.id, turn: d.turn, at, kind: "tool", tool: b.name, title: describeTool(b.name, b.input, cwd) };
     d.steps.push(step);
@@ -672,14 +733,16 @@ export function createTranscripts() {
     const file = locate(s);
     if (!file) return null;
     let d = digests[s.id];
-    if (d && d.file === file) return d;
+    // A side thread can say hello before it's known as one (side_at): read again from the start once it is.
+    const since = s.side_at || null;
+    if (d && d.file === file && (d.since || null) === since) return d;
     let size;
     try {
       size = fs.statSync(file).size;
     } catch {
       return null;
     }
-    d = digests[s.id] = blank(file);
+    d = digests[s.id] = Object.assign(blank(file), { since, copied: !!since });
     follow(d, (e, span) => take(d, e, s.cwd, span));
     followSubs(d, s.cwd);
     return d;
@@ -699,7 +762,7 @@ export function createTranscripts() {
         } catch {
           continue;
         }
-        if (size < d.offset) Object.assign(d, blank(d.file));
+        if (size < d.offset) Object.assign(d, blank(d.file), { copied: !!d.since });
         follow(d, (e, span) => take(d, e, s.cwd, span));
         followSubs(d, s.cwd);
       }
@@ -753,6 +816,9 @@ export function createTranscripts() {
   // What the step that left a command running in the background (by Claude Code's id for it) was called.
   const taskTitle = (s, id) => digests[s.id]?.tasks?.get(id) || null;
 
+  // What it left running in the background and hasn't heard the end of (noteLeft): [{ id, kind, title, started }].
+  const left = (s) => [...(digests[s.id]?.bg?.values() || [])].filter((x) => !x.until || x.until > Date.now()).map(({ until, ...x }) => x);
+
   // The slash commands it ran, and what each printed (noteRan).
   const ran = (s) => digests[s.id]?.ran || [];
 
@@ -763,5 +829,38 @@ export function createTranscripts() {
     return [...(digests[s.id]?.workers?.values() || [])].map((w) => (!going(w) ? { ...w, step: null } : over ? { ...w, state: "stopped", ended: over, step: null } : { ...w }));
   }
 
-  return { digest, poll, live, interrupted, snapshot, skills, images, pictures, taskTitle, ran, workers, load: loadEdit, forget: (key) => delete digests[key] };
+  // Which of these sessions is making this call to one of agentbook's tools through a server they share (noteCall),
+  // as their transcripts say right now: the one with that call unanswered, by its id when the server passed it on
+  // (Claude Code's `_meta`), else by its name and arguments. The earliest, when two made the same call; each call
+  // is found once. null when none has it (yet: a transcript is written a moment after the call is made).
+  function caller(sessions, name, args, id) {
+    const want = canon(args);
+    let found = null;
+    for (const s of sessions) {
+      const d = digest(s);
+      if (!d) continue;
+      follow(d, (e, span) => take(d, e, s.cwd, span));
+      for (const [cid, c] of d.calls || []) {
+        if (c.taken || c.name !== name) continue;
+        if (id && cid === id) found = { s, c, sure: true };
+        else if (c.args === want && !found?.sure && (!found || c.at < found.c.at)) found = { s, c };
+      }
+    }
+    if (found) found.c.taken = true;
+    return found?.s || null;
+  }
+
+  // The next-step box its turn ended on (noteWrapUp), as its transcript says right now: { ask, replies }, once; null
+  // when this turn made none.
+  function wrapUp(s) {
+    const d = digest(s);
+    if (!d) return null;
+    follow(d, (e, span) => take(d, e, s.cwd, span));
+    const w = d.wrap;
+    if (!w || w.turn !== d.turn) return null;
+    d.wrap = null;
+    return { ask: w.ask, replies: w.replies };
+  }
+
+  return { digest, poll, live, interrupted, caller, wrapUp, snapshot, skills, images, pictures, taskTitle, left, ran, workers, load: loadEdit, forget: (key) => delete digests[key] };
 }
